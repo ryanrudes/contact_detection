@@ -55,6 +55,8 @@ Foot support state plot for unified NPZ files:
 python main.py --config configs/config.yaml
 ```
 
+![Per-foot air, ground, and skateboard states from pushoff5_twoshoes](assets/pushoff5_twoshoes_foot_support_states.png)
+
 `main.py` scans for `*/unified.npz` files containing `t`,
 `vicon__body_names`, and `vicon__body_pos`, then writes
 `outputs/<trial>_foot_support_states.png` with per-foot `air`, `ground`, and
