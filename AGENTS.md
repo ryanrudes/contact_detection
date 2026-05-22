@@ -27,8 +27,6 @@
 ## Package Structure
 
 - Public imports should come from `contact_detection`.
-- Compatibility imports through `src.contact_detection` and
-  `src.silence_detection` should continue to work.
 - `src/contact_detection/foot_support.py` contains the per-foot
   air/ground/skateboard classifier used by `main.py`.
 - `src/contact_detection/contact.py` contains the generic support-surface and

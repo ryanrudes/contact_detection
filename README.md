@@ -49,14 +49,6 @@ surface = PlaneSupportModel.fit(candidate_points, SupportDetectionConfig(model_t
 result = detect_contact_intervals(t, points, supports=surface)
 ```
 
-Legacy tuple unpacking is still supported for quiet detection:
-
-```python
-intervals, mask, debug = detect_quiet_intervals(t, z, config=config)
-```
-
-New code should prefer `result.intervals`, `result.mask`, and `result.debug`.
-
 Foot support state plot for unified NPZ files:
 
 ```bash
@@ -101,9 +93,6 @@ from contact_detection import (
     detect_quiet_intervals,
 )
 ```
-
-The repo also preserves legacy imports such as `from src.contact_detection import ...`
-and `from src.silence_detection import ...` for existing scripts/tests.
 
 ## Support Models
 

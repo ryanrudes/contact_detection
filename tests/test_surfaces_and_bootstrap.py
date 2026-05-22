@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from src.contact_detection import (
+from contact_detection import (
     HeightmapSupportModel,
     LocalPercentileHeightmap,
     PlaneSupportModel,

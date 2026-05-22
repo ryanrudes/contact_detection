@@ -2,15 +2,14 @@ import unittest
 
 import numpy as np
 
-from src.contact_detection import (
+from contact_detection import (
     HeightmapSupportModel,
     PlaneSupportModel,
+    QuietSignalType,
     detect_contact_intervals,
 )
-from src.silence_detection import (
-    QuietSignalType,
+from contact_detection.quiet import (
     compute_quiet_activity_and_spread,
-    detect_z_quiet_intervals,
     local_polynomial_derivative,
     time_gaussian_smooth,
 )
@@ -51,18 +50,6 @@ class QuietDetectionTests(unittest.TestCase):
 
         self.assertLess(float(np.max(activity)), 1e-8)
         self.assertLess(float(np.max(spread)), 1e-8)
-
-    def test_detect_z_quiet_intervals_keeps_compatibility_debug_keys(self):
-        t = np.linspace(0.0, 1.0, 101)
-        z = np.zeros_like(t)
-
-        intervals, mask, debug = detect_z_quiet_intervals(t, z)
-
-        self.assertEqual(mask.shape, t.shape)
-        self.assertEqual(intervals, [(0.0, 1.0)])
-        for key in ("z_raw", "z_smooth", "vz", "vz_smooth", "vz_rms", "z_range"):
-            self.assertIn(key, debug)
-
 
 class ContactDetectionTests(unittest.TestCase):
     """Tests for support-surface fitting and contact interval detection."""

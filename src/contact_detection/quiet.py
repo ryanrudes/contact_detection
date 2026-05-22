@@ -15,7 +15,7 @@ from .types import BoolArray, DebugDict, FloatArray, IntervalList
 
 _E = TypeVar("_E", bound=Enum)
 
-CONTACT_MIN_TIME = 0.18      # not 1.0 unless detecting standing
+DEFAULT_MIN_INTERVAL_TIME = 0.18  # not 1.0 unless detecting standing
 MAX_GAP_TIME = 0.10          # fill tiny holes
 MIN_BLIP_TIME = 0.15         # remove tiny false contacts
 
@@ -61,8 +61,7 @@ class QuietDetectionConfig:
 
     signal_type: QuietSignalType = QuietSignalType.SCALAR
     vector_mode: VectorQuietMode = VectorQuietMode.NORM
-    min_interval_time: float = CONTACT_MIN_TIME
-    contact_min_time: float | None = None
+    min_interval_time: float = DEFAULT_MIN_INTERVAL_TIME
     max_gap_time: float = MAX_GAP_TIME
     min_blip_time: float = MIN_BLIP_TIME
     pos_smooth_time: float = POS_SMOOTH_TIME
@@ -83,15 +82,6 @@ class QuietDetectionConfig:
     use_time_windows: bool = True
     quaternion_scalar_last: bool = True
 
-    @property
-    def effective_min_interval_time(self) -> float:
-        """Minimum interval length, honoring legacy ``contact_min_time`` override."""
-
-        if self.contact_min_time is not None:
-            return self.contact_min_time
-        return self.min_interval_time
-
-
 @dataclass
 class QuietDetectionResult:
     """Output of quiet-interval detection on a single motion channel."""
@@ -102,12 +92,6 @@ class QuietDetectionResult:
     spread: FloatArray
     scores: FloatArray | None
     debug: DebugDict
-
-    def __iter__(self) -> Iterator[IntervalList | BoolArray | DebugDict]:
-        """Legacy tuple unpacking compatibility: ``intervals``, ``mask``, ``debug``."""
-        yield self.intervals
-        yield self.mask
-        yield self.debug
 
 
 def near_zero_intervals(
@@ -1003,7 +987,7 @@ def detect_quiet_intervals(
     X_raw: ArrayLike,
     signal_type: QuietSignalType | str = QuietSignalType.SCALAR,
     vector_mode: VectorQuietMode | str = VectorQuietMode.NORM,
-    contact_min_time: float = CONTACT_MIN_TIME,
+    min_interval_time: float = DEFAULT_MIN_INTERVAL_TIME,
     max_gap_time: float = MAX_GAP_TIME,
     min_blip_time: float = MIN_BLIP_TIME,
     pos_smooth_time: float = POS_SMOOTH_TIME,
@@ -1033,7 +1017,7 @@ def detect_quiet_intervals(
             raise TypeError("config must be a QuietDetectionConfig.")
         signal_type = config.signal_type
         vector_mode = config.vector_mode
-        contact_min_time = config.effective_min_interval_time
+        min_interval_time = config.min_interval_time
         max_gap_time = config.max_gap_time
         min_blip_time = config.min_blip_time
         pos_smooth_time = config.pos_smooth_time
@@ -1105,7 +1089,7 @@ def detect_quiet_intervals(
         min_blip_time=min_blip_time,
     )
 
-    intervals = intervals_from_mask(t_raw, quiet_mask, min_duration=contact_min_time)
+    intervals = intervals_from_mask(t_raw, quiet_mask, min_duration=min_interval_time)
 
     debug.update({
         "dt_med": dt_med,
@@ -1131,66 +1115,6 @@ def detect_quiet_intervals(
         scores=None,
         debug=debug,
     )
-
-
-def detect_z_quiet_intervals(
-    t_raw: ArrayLike,
-    z_raw: ArrayLike,
-    contact_min_time: float = CONTACT_MIN_TIME,
-    max_gap_time: float = MAX_GAP_TIME,
-    min_blip_time: float = MIN_BLIP_TIME,
-    pos_smooth_time: float = POS_SMOOTH_TIME,
-    vel_smooth_time: float = VEL_SMOOTH_TIME,
-    quiet_window_time: float = QUIET_WINDOW_TIME,
-    z_range_window_time: float = Z_RANGE_WINDOW_TIME,
-    z_range_on_eps: float = Z_RANGE_ON_EPS,
-    z_range_off_eps: float = Z_RANGE_OFF_EPS,
-    use_time_gaussian_smoothing: bool = True,
-) -> tuple[IntervalList, BoolArray, DebugDict]:
-    """Detect intervals where vertical motion is locally quiet (legacy z-only API).
-
-    Compatibility wrapper around :func:`detect_quiet_intervals` for scalar
-    position-component signals. Returns ``(intervals, mask, debug)`` rather than
-    :class:`QuietDetectionResult`.
-    """
-
-    result = detect_quiet_intervals(
-        t_raw,
-        z_raw,
-        signal_type=QuietSignalType.POSITION_COMPONENT,
-        vector_mode=VectorQuietMode.NORM,
-        contact_min_time=contact_min_time,
-        max_gap_time=max_gap_time,
-        min_blip_time=min_blip_time,
-        pos_smooth_time=pos_smooth_time,
-        vel_smooth_time=vel_smooth_time,
-        quiet_window_time=quiet_window_time,
-        spread_window_time=z_range_window_time,
-        spread_on_eps=z_range_on_eps,
-        spread_off_eps=z_range_off_eps,
-        min_activity_on_eps=MIN_VZ_ON_EPS,
-        min_activity_off_eps=MIN_VZ_OFF_EPS,
-        use_time_gaussian_smoothing=use_time_gaussian_smoothing,
-    )
-    intervals = result.intervals
-    quiet_mask = result.mask
-    debug = dict(result.debug)
-    debug.update({
-        "z_raw": debug["X_raw"],
-        "z_smooth": debug["X_smooth"],
-        "vz": debug["dX"],
-        "vz_smooth": debug["dX_smooth"],
-        "abs_vz": np.abs(debug["dX_smooth"]),
-        "vz_rms": debug["activity"],
-        "vz_std": moving_std(debug["dX_smooth"], debug["activity_window_samples"]),
-        "z_range": debug["spread"],
-        "vz_on_eps": debug["activity_on_eps"],
-        "vz_off_eps": debug["activity_off_eps"],
-        "z_range_on_eps": debug["spread_on_eps"],
-        "z_range_off_eps": debug["spread_off_eps"],
-    })
-
-    return intervals, quiet_mask, debug
 
 
 def print_z_quiet_debug_summary(debug: DebugDict) -> None:
@@ -1302,8 +1226,28 @@ if __name__ == "__main__":
         up_axis=args.up_axis,
     )
 
-    intervals, quiet_mask, debug = detect_z_quiet_intervals(t_raw, z_raw)
+    result = detect_quiet_intervals(
+        t_raw,
+        z_raw,
+        config=QuietDetectionConfig(signal_type=QuietSignalType.POSITION_COMPONENT),
+    )
+    debug = dict(result.debug)
+    debug.update({
+        "z_raw": debug["X_raw"],
+        "z_smooth": debug["X_smooth"],
+        "vz": debug["dX"],
+        "vz_smooth": debug["dX_smooth"],
+        "abs_vz": np.abs(debug["dX_smooth"]),
+        "vz_rms": debug["activity"],
+        "vz_std": moving_std(debug["dX_smooth"], debug["activity_window_samples"]),
+        "z_range": debug["spread"],
+        "vz_on_eps": debug["activity_on_eps"],
+        "vz_off_eps": debug["activity_off_eps"],
+        "z_range_on_eps": debug["spread_on_eps"],
+        "z_range_off_eps": debug["spread_off_eps"],
+        "quiet_mask": result.mask,
+    })
 
-    print(intervals)
+    print(result.intervals)
     print_z_quiet_debug_summary(debug)
-    plot_z_quiet_debug(t_raw, intervals, debug)
+    plot_z_quiet_debug(t_raw, result.intervals, debug)

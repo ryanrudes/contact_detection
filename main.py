@@ -10,12 +10,8 @@ from typing import Any, Iterable
 
 import yaml
 
-try:
-    from contact_detection import FootSupportConfig, classify_foot_support_states, load_unified_npz
-    from contact_detection.debug import plot_foot_support_states
-except ImportError:  # pragma: no cover - supports running from repo root without install
-    from src.contact_detection import FootSupportConfig, classify_foot_support_states, load_unified_npz
-    from src.contact_detection.debug import plot_foot_support_states
+from contact_detection import FootSupportConfig, classify_foot_support_states, load_unified_npz
+from contact_detection.debug import plot_foot_support_states
 
 DEFAULT_CONFIG_PATH = Path("configs/config.yaml")
 

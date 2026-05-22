@@ -11,28 +11,16 @@ from scipy.spatial import cKDTree
 
 from .types import BoolArray, DebugDict, FloatArray, IntervalList
 
-try:
-    from .quiet import (
-        QuietDetectionConfig,
-        QuietSignalType,
-        VectorQuietMode,
-        clean_mask_by_time,
-        detect_quiet_intervals,
-        intervals_from_mask,
-        local_polynomial_derivative,
-        score_hysteresis_mask,
-    )
-except ImportError:  # pragma: no cover - supports direct script-style imports
-    from quiet import (
-        QuietDetectionConfig,
-        QuietSignalType,
-        VectorQuietMode,
-        clean_mask_by_time,
-        detect_quiet_intervals,
-        intervals_from_mask,
-        local_polynomial_derivative,
-        score_hysteresis_mask,
-    )
+from .quiet import (
+    QuietDetectionConfig,
+    QuietSignalType,
+    VectorQuietMode,
+    clean_mask_by_time,
+    detect_quiet_intervals,
+    intervals_from_mask,
+    local_polynomial_derivative,
+    score_hysteresis_mask,
+)
 
 
 @dataclass(frozen=True)
@@ -368,7 +356,7 @@ def find_support_candidates(
         quiet_config = QuietDetectionConfig(
             signal_type=QuietSignalType.VECTOR_POSITION,
             vector_mode=quiet_config.vector_mode,
-            min_interval_time=quiet_config.effective_min_interval_time,
+            min_interval_time=quiet_config.min_interval_time,
             max_gap_time=quiet_config.max_gap_time,
             min_blip_time=quiet_config.min_blip_time,
             pos_smooth_time=quiet_config.pos_smooth_time,
@@ -390,7 +378,7 @@ def find_support_candidates(
             quaternion_scalar_last=quiet_config.quaternion_scalar_last,
         )
 
-    min_duration = quiet_config.effective_min_interval_time if min_duration is None else min_duration
+    min_duration = quiet_config.min_interval_time if min_duration is None else min_duration
     candidates: list[SupportCandidate] = []
 
     for keypoint_index in range(points.shape[1]):
@@ -461,7 +449,7 @@ def bootstrap_support_surface(
     filtered = filter_support_candidates(
         candidates,
         up_axis=config.up_axis,
-        min_duration=(quiet_config.effective_min_interval_time if quiet_config else None),
+        min_duration=(quiet_config.min_interval_time if quiet_config else None),
     )
 
     candidate_points = filtered.points
@@ -811,7 +799,7 @@ def _detect_point_quietness(
     quiet_config = QuietDetectionConfig(
         signal_type=QuietSignalType.VECTOR_POSITION,
         vector_mode=quiet_config.vector_mode,
-        min_interval_time=quiet_config.effective_min_interval_time,
+        min_interval_time=quiet_config.min_interval_time,
         max_gap_time=quiet_config.max_gap_time,
         min_blip_time=quiet_config.min_blip_time,
         pos_smooth_time=quiet_config.pos_smooth_time,
@@ -837,9 +825,9 @@ def _detect_point_quietness(
     masks = []
     debug = []
     for point_idx in range(n_points):
-        _, mask, point_debug = detect_quiet_intervals(t, points[:, point_idx, :], config=quiet_config)
-        masks.append(mask)
-        debug.append(point_debug)
+        quiet_result = detect_quiet_intervals(t, points[:, point_idx, :], config=quiet_config)
+        masks.append(quiet_result.mask)
+        debug.append(quiet_result.debug)
     return np.column_stack(masks), debug
 
 
@@ -850,10 +838,7 @@ def _estimate_orientation_activity(
     n_frames: int,
     scalar_last: bool = True,
 ) -> FloatArray:
-    try:
-        from .quiet import quaternion_angular_speed, quaternion_standardize_xyzw
-    except ImportError:  # pragma: no cover
-        from quiet import quaternion_angular_speed, quaternion_standardize_xyzw
+    from .quiet import quaternion_angular_speed, quaternion_standardize_xyzw
 
     orientations = np.asarray(orientations, dtype=float)
     if orientations.shape == (n_frames, 4):

@@ -2,8 +2,8 @@ import unittest
 
 import numpy as np
 
-from src.contact_detection import QuietDetectionConfig, QuietSignalType, VectorQuietMode
-from src.contact_detection.quiet import detect_quiet_intervals, time_window_range, time_window_rms
+from contact_detection import QuietDetectionConfig, QuietSignalType, VectorQuietMode
+from contact_detection.quiet import detect_quiet_intervals, time_window_range, time_window_rms
 
 
 class QuietApiTests(unittest.TestCase):
@@ -54,6 +54,23 @@ class QuietApiTests(unittest.TestCase):
         self.assertEqual(local_range.shape, x.shape)
         self.assertGreater(rms[2], 0.0)
         self.assertGreaterEqual(local_range[1], 1.0)
+
+    def test_detect_quiet_intervals_returns_result_object(self):
+        t = np.linspace(0.0, 1.0, 101)
+        x = np.zeros_like(t)
+
+        result = detect_quiet_intervals(
+            t,
+            x,
+            config=QuietDetectionConfig(signal_type=QuietSignalType.POSITION_COMPONENT),
+        )
+
+        self.assertEqual(result.intervals, [(0.0, 1.0)])
+        self.assertEqual(result.mask.shape, t.shape)
+        self.assertEqual(result.activity.shape, t.shape)
+        self.assertEqual(result.spread.shape, t.shape)
+        self.assertIn("activity", result.debug)
+        self.assertIn("spread", result.debug)
 
 
 if __name__ == "__main__":

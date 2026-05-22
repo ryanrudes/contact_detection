@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from src.contact_detection import (
+from contact_detection import (
     ContactDetectionConfig,
     PlaneSupportModel,
     QuietDetectionConfig,
@@ -59,6 +59,21 @@ class ContactApiTests(unittest.TestCase):
         self.assertTrue(result.point_mask[:, 0].all())
         self.assertFalse(result.point_mask[:, 1].any())
         self.assertTrue(result.mask.all())
+
+    def test_detect_contact_intervals_frame_mask_contract(self):
+        t = np.linspace(0.0, 1.0, 101)
+        points = np.zeros((len(t), 1, 3))
+        support_surface = PlaneSupportModel(
+            normal=np.array([0.0, 0.0, 1.0]),
+            origin=np.zeros(3),
+        )
+
+        result = detect_contact_intervals(t, points, supports=support_surface)
+
+        self.assertEqual(result.mask.shape, t.shape)
+        self.assertEqual(result.scores.shape, t.shape)
+        self.assertTrue(result.mask.all())
+        self.assertTrue(result.intervals)
 
 
 if __name__ == "__main__":

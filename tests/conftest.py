@@ -1,10 +1,10 @@
-"""Ensure the repository root is on ``sys.path`` for ``src.*`` test imports."""
+"""Ensure the installed package source tree is on ``sys.path`` for tests."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[1]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))

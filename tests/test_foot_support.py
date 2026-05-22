@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from src.contact_detection import (
+from contact_detection import (
     FootSupportConfig,
     FootSupportState,
     classify_foot_support_states,
