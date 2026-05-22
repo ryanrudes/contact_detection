@@ -1,0 +1,56 @@
+data:
+  # Directory containing */unified.npz trials, or one direct unified.npz path.
+  input: data
+
+  # Output directory for multiple trials, or a .png path for one direct input file.
+  output: outputs
+
+plot:
+  # Set true to open an interactive matplotlib window after writing plots.
+  show: false
+
+foot_support:
+  # Unified NPZ rigid-body names.
+  foot_names:
+    - Left_Shoe
+    - Right_Shoe
+  board_name: Skateboard
+
+  # Coordinate convention. Vicon data uses z-up.
+  up_axis: 2
+
+  # Floor calibration. Use "plane" for robust lower-envelope plane fitting, or
+  # "height" for a single scalar floor height from low observed foot samples.
+  floor_model: plane
+  floor_low_percentile: 15.0
+  floor_plane_candidate_percentile: 50.0
+  floor_plane_residual_tolerance: 0.025
+  floor_plane_ransac_iterations: 128
+  floor_plane_random_seed: 17
+
+  # Ground contact evidence.
+  ground_clearance_tolerance: 0.025
+  ground_speed_tolerance: 0.18
+
+  # Skateboard contact geometry.
+  board_horizontal_tolerance: 0.35
+  board_vertical_tolerance: 0.035
+  board_min_relative_height: 0.0
+  board_max_relative_height: 0.14
+
+  # Skateboard contact motion evidence. Relative foot-board speed is the main
+  # cue while the board is moving; static board/foot speed handles stationary
+  # setup frames.
+  board_relative_speed_tolerance: 0.12
+  static_board_speed_tolerance: 0.05
+  static_board_foot_speed_tolerance: 0.15
+
+  # Board-contact offset is learned from likely board-contact samples, with this
+  # fallback if there are too few candidates.
+  default_board_contact_offset: 0.055
+  min_board_offset_samples: 10
+
+  # Temporal smoothing/cleanup.
+  velocity_window_time: 0.08
+  max_gap_time: 0.10
+  min_state_time: 0.12
