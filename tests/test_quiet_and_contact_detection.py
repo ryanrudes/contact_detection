@@ -8,9 +8,7 @@ from src.contact_detection import (
     detect_contact_intervals,
 )
 from src.silence_detection import (
-    QuietDetectionConfig,
     QuietSignalType,
-    VectorQuietMode,
     compute_quiet_activity_and_spread,
     detect_z_quiet_intervals,
     local_polynomial_derivative,
@@ -19,6 +17,7 @@ from src.silence_detection import (
 
 
 class QuietDetectionTests(unittest.TestCase):
+    """Tests for quiet-detection signal processing utilities."""
     def test_time_gaussian_smooth_handles_irregular_timestamps(self):
         t = np.array([0.0, 0.01, 0.04, 0.11, 0.20])
         x = np.array([0.0, 0.0, 1.0, 0.0, 0.0])
@@ -66,6 +65,7 @@ class QuietDetectionTests(unittest.TestCase):
 
 
 class ContactDetectionTests(unittest.TestCase):
+    """Tests for support-surface fitting and contact interval detection."""
     def test_flat_floor_contact_and_swing(self):
         t = np.linspace(0.0, 2.0, 201)
         points = np.zeros((len(t), 1, 3))

@@ -1,12 +1,37 @@
 [project]
-name = "event-detection"
+name = "contact-detection"
 version = "0.1.0"
-description = "Add your description here"
+description = "NumPy-first utilities for quiet interval and contact detection from motion time series."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
-    "matplotlib>=3.10.9",
-    "numba>=0.65.1",
-    "numpy>=2.4.5",
-    "scipy>=1.17.1",
+    "numpy",
+    "pyyaml>=6.0.3",
+    "scipy",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "mypy",
+    "pytest",
+    "ruff",
+]
+plot = [
+    "matplotlib",
+]
+ml = [
+    "torch",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

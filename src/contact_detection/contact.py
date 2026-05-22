@@ -1,13 +1,18 @@
+"""Support-surface fitting and marker-based contact interval detection."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol, Sequence
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 from scipy.spatial import cKDTree
 
+from .types import BoolArray, DebugDict, FloatArray, IntervalList
+
 try:
-    from .silence_detection import (
+    from .quiet import (
         QuietDetectionConfig,
         QuietSignalType,
         VectorQuietMode,
@@ -18,7 +23,7 @@ try:
         score_hysteresis_mask,
     )
 except ImportError:  # pragma: no cover - supports direct script-style imports
-    from silence_detection import (
+    from quiet import (
         QuietDetectionConfig,
         QuietSignalType,
         VectorQuietMode,
@@ -32,10 +37,16 @@ except ImportError:  # pragma: no cover - supports direct script-style imports
 
 @dataclass(frozen=True)
 class SupportDetectionConfig:
+    """Parameters for fitting ground/support geometry from quiet marker samples."""
+
+    model_type: Literal["auto", "plane", "heightmap", "local_heightmap"] = "auto"
     plane_residual_tolerance: float = 0.025
     coplanarity_ratio_threshold: float = 0.85
     heightmap_cell_size: float = 0.10
     heightmap_quantile: float = 0.20
+    local_heightmap_radius: float = 0.25
+    local_heightmap_quantile: float = 0.20
+    local_heightmap_min_neighbors: int = 3
     min_support_points: int = 20
     max_bootstrap_iterations: int = 3
     convergence_tolerance: float = 0.01
@@ -46,6 +57,8 @@ class SupportDetectionConfig:
 
 @dataclass(frozen=True)
 class ContactDetectionConfig:
+    """Thresholds and feature weights for contact scoring and mask cleanup."""
+
     quiet_config: QuietDetectionConfig = field(
         default_factory=lambda: QuietDetectionConfig(
             signal_type=QuietSignalType.VECTOR_POSITION,
@@ -69,6 +82,7 @@ class ContactDetectionConfig:
         }
     )
     clearance_scale: float = 0.03
+    contact_offset_max: float | None = None
     normal_speed_scale: float = 0.08
     tangential_speed_scale: float = 0.08
     angular_speed_scale: float = 1.00
@@ -82,35 +96,71 @@ class ContactDetectionConfig:
 
 @dataclass
 class ContactDetectionResult:
-    intervals: list[tuple[float, float]]
-    mask: np.ndarray
-    scores: np.ndarray
-    support_ids: np.ndarray
-    features: dict[str, np.ndarray]
-    support_models: list["SupportModel"]
-    debug: dict[str, object]
+    """Output of frame-level contact detection on a marker point cloud."""
+
+    intervals: IntervalList
+    mask: BoolArray
+    scores: FloatArray
+    support_ids: NDArray[np.int_]
+    features: dict[str, FloatArray]
+    support_models: list[SupportModel]
+    debug: DebugDict
+    point_mask: BoolArray | None = None
 
 
 class SupportModel(Protocol):
+    """Protocol for geometry that exposes clearance and surface normals."""
+
     name: str
 
-    def clearance(self, points: np.ndarray) -> np.ndarray:
+    def clearance(self, points: ArrayLike) -> FloatArray:
+        """Signed distance above the support surface (positive = above)."""
         ...
 
-    def normals_at(self, points: np.ndarray) -> np.ndarray:
+    def normals_at(self, points: ArrayLike) -> FloatArray:
+        """Unit surface normal at each query point."""
         ...
 
 
 @dataclass
+class SupportCandidate:
+    """A quiet interval summarized as a single 3D support sample."""
+
+    point: FloatArray
+    keypoint_index: int
+    start: float
+    end: float
+    duration: float
+    spread: float
+    activity: float
+
+
+@dataclass
+class SupportCandidateSet:
+    """Collection of support candidates gathered from per-marker quiet intervals."""
+
+    candidates: list[SupportCandidate]
+
+    @property
+    def points(self) -> FloatArray:
+        """Stack candidate points into an ``(M, 3)`` array."""
+        if not self.candidates:
+            return np.empty((0, 3), dtype=float)
+        return np.asarray([candidate.point for candidate in self.candidates], dtype=float)
+
+
+@dataclass
 class PlaneSupportModel:
-    normal: np.ndarray
-    origin: np.ndarray
-    residuals: np.ndarray | None = None
-    inlier_mask: np.ndarray | None = None
+    """Planar support surface fit with RANSAC refinement."""
+
+    normal: FloatArray
+    origin: FloatArray
+    residuals: FloatArray | None = None
+    inlier_mask: BoolArray | None = None
     name: str = "plane"
 
     @classmethod
-    def fit(cls, points: np.ndarray, config: SupportDetectionConfig) -> "PlaneSupportModel":
+    def fit(cls, points: ArrayLike, config: SupportDetectionConfig) -> PlaneSupportModel:
         points = _validate_point_cloud(points)
         if len(points) < 3:
             raise ValueError("Need at least 3 points to fit a plane.")
@@ -144,26 +194,28 @@ class PlaneSupportModel:
         inlier_mask = np.abs(residuals) <= config.plane_residual_tolerance
         return cls(normal=normal, origin=origin, residuals=residuals, inlier_mask=inlier_mask)
 
-    def clearance(self, points: np.ndarray) -> np.ndarray:
+    def clearance(self, points: ArrayLike) -> FloatArray:
         points = np.asarray(points, dtype=float)
         return (points - self.origin) @ self.normal
 
-    def normals_at(self, points: np.ndarray) -> np.ndarray:
+    def normals_at(self, points: ArrayLike) -> FloatArray:
         points = np.asarray(points, dtype=float)
         return np.broadcast_to(self.normal, points.shape).copy()
 
 
 @dataclass
 class HeightmapSupportModel:
+    """Piecewise height field on a regular XY grid."""
+
     cell_size: float
-    cells_xy: np.ndarray
-    heights: np.ndarray
+    cells_xy: FloatArray
+    heights: FloatArray
     up_axis: int = 2
     name: str = "heightmap"
     _tree: cKDTree | None = field(default=None, init=False, repr=False)
 
     @classmethod
-    def fit(cls, points: np.ndarray, config: SupportDetectionConfig) -> "HeightmapSupportModel":
+    def fit(cls, points: ArrayLike, config: SupportDetectionConfig) -> HeightmapSupportModel:
         points = _validate_point_cloud(points)
         if len(points) < 1:
             raise ValueError("Need at least 1 point to fit a heightmap.")
@@ -196,12 +248,77 @@ class HeightmapSupportModel:
         model._tree = cKDTree(model.cells_xy)
         return model
 
-    def _height_at_xy(self, xy: np.ndarray) -> np.ndarray:
+    def _height_at_xy(self, xy: ArrayLike) -> FloatArray:
         xy = np.asarray(xy, dtype=float)
         if self._tree is None:
             self._tree = cKDTree(self.cells_xy)
         _, idx = self._tree.query(xy, k=1)
         return self.heights[idx]
+
+    def clearance(self, points: ArrayLike) -> FloatArray:
+        points = np.asarray(points, dtype=float)
+        horizontal_axes = _horizontal_axes(self.up_axis)
+        support_height = self._height_at_xy(points[:, horizontal_axes])
+        return points[:, self.up_axis] - support_height
+
+    def normals_at(self, points: ArrayLike) -> FloatArray:
+        points = np.asarray(points, dtype=float)
+        normals = np.zeros_like(points, dtype=float)
+        normals[:, self.up_axis] = 1.0
+        return normals
+
+
+@dataclass
+class LocalPercentileHeightmap:
+    """Neighborhood percentile height field for uneven terrain."""
+
+    points: FloatArray
+    radius: float
+    quantile: float
+    min_neighbors: int
+    up_axis: int = 2
+    name: str = "local_heightmap"
+    _tree: cKDTree | None = field(default=None, init=False, repr=False)
+
+    @classmethod
+    def fit(cls, points: ArrayLike, config: SupportDetectionConfig) -> LocalPercentileHeightmap:
+        points = _validate_point_cloud(points)
+        if len(points) < 1:
+            raise ValueError("Need at least 1 point to fit a local heightmap.")
+        radius = float(config.local_heightmap_radius)
+        if radius <= 0.0:
+            raise ValueError("local_heightmap_radius must be positive.")
+        model = cls(
+            points=points.copy(),
+            radius=radius,
+            quantile=float(config.local_heightmap_quantile),
+            min_neighbors=int(config.local_heightmap_min_neighbors),
+            up_axis=config.up_axis,
+        )
+        model._tree = cKDTree(points[:, _horizontal_axes(config.up_axis)])
+        return model
+
+    def _height_at_xy(self, xy: ArrayLike) -> FloatArray:
+        xy = np.asarray(xy, dtype=float)
+        if self._tree is None:
+            self._tree = cKDTree(self.points[:, _horizontal_axes(self.up_axis)])
+
+        heights = np.empty(len(xy), dtype=float)
+        support_z = self.points[:, self.up_axis]
+        k = min(max(self.min_neighbors, 1), len(self.points))
+
+        for i, query in enumerate(xy):
+            neighbor_idx = self._tree.query_ball_point(query, r=self.radius)
+            if len(neighbor_idx) < self.min_neighbors:
+                _, nearest_idx = self._tree.query(query, k=k)
+                neighbor_idx = np.atleast_1d(nearest_idx).astype(int).tolist()
+            values = support_z[neighbor_idx]
+            if values.size == 0:
+                _, nearest_idx = self._tree.query(query, k=1)
+                values = np.asarray([support_z[int(nearest_idx)]])
+            heights[i] = float(np.quantile(values, self.quantile))
+
+        return heights
 
     def clearance(self, points: np.ndarray) -> np.ndarray:
         points = np.asarray(points, dtype=float)
@@ -216,20 +333,193 @@ class HeightmapSupportModel:
         return normals
 
 
+def find_support_candidates(
+    t: ArrayLike,
+    points: ArrayLike,
+    quiet_config: QuietDetectionConfig | None = None,
+    min_duration: float | None = None,
+) -> SupportCandidateSet:
+    """Find quiet intervals per marker and summarize each as a support candidate.
+
+    Parameters
+    ----------
+    t:
+        Timestamps with shape ``(N,)``.
+    points:
+        Marker positions with shape ``(N, K, 3)`` or ``(N, 3)``.
+    quiet_config:
+        Quiet-detection settings applied independently to each marker.
+    min_duration:
+        Override minimum quiet interval length; defaults to the config value.
+
+    Returns
+    -------
+    SupportCandidateSet
+        One candidate per qualifying quiet interval and marker.
+    """
+
+    t = np.asarray(t, dtype=float)
+    points = _validate_points_over_time(points)
+    quiet_config = quiet_config or QuietDetectionConfig(
+        signal_type=QuietSignalType.VECTOR_POSITION,
+        vector_mode=VectorQuietMode.EUCLIDEAN,
+    )
+    if quiet_config.signal_type != QuietSignalType.VECTOR_POSITION:
+        quiet_config = QuietDetectionConfig(
+            signal_type=QuietSignalType.VECTOR_POSITION,
+            vector_mode=quiet_config.vector_mode,
+            min_interval_time=quiet_config.effective_min_interval_time,
+            max_gap_time=quiet_config.max_gap_time,
+            min_blip_time=quiet_config.min_blip_time,
+            pos_smooth_time=quiet_config.pos_smooth_time,
+            vel_smooth_time=quiet_config.vel_smooth_time,
+            quiet_window_time=quiet_config.quiet_window_time,
+            spread_window_time=quiet_config.spread_window_time,
+            derivative_window_time=quiet_config.derivative_window_time,
+            derivative_poly_degree=quiet_config.derivative_poly_degree,
+            activity_on_eps=quiet_config.activity_on_eps,
+            activity_off_eps=quiet_config.activity_off_eps,
+            spread_on_eps=quiet_config.spread_on_eps,
+            spread_off_eps=quiet_config.spread_off_eps,
+            min_activity_on_eps=quiet_config.min_activity_on_eps,
+            min_activity_off_eps=quiet_config.min_activity_off_eps,
+            min_spread_on_eps=quiet_config.min_spread_on_eps,
+            min_spread_off_eps=quiet_config.min_spread_off_eps,
+            use_time_gaussian_smoothing=quiet_config.use_time_gaussian_smoothing,
+            use_time_windows=quiet_config.use_time_windows,
+            quaternion_scalar_last=quiet_config.quaternion_scalar_last,
+        )
+
+    min_duration = quiet_config.effective_min_interval_time if min_duration is None else min_duration
+    candidates: list[SupportCandidate] = []
+
+    for keypoint_index in range(points.shape[1]):
+        result = detect_quiet_intervals(t, points[:, keypoint_index, :], config=quiet_config)
+        for start, end in result.intervals:
+            duration = float(end - start)
+            if duration < min_duration:
+                continue
+            interval_mask = (t >= start) & (t <= end)
+            if not interval_mask.any():
+                continue
+            candidates.append(
+                SupportCandidate(
+                    point=np.median(points[interval_mask, keypoint_index, :], axis=0),
+                    keypoint_index=keypoint_index,
+                    start=float(start),
+                    end=float(end),
+                    duration=duration,
+                    spread=float(np.median(result.spread[interval_mask])),
+                    activity=float(np.median(result.activity[interval_mask])),
+                )
+            )
+
+    return SupportCandidateSet(candidates)
+
+
+def filter_support_candidates(
+    candidates: SupportCandidateSet | Sequence[SupportCandidate],
+    up_axis: int = 2,
+    low_quantile: float = 0.50,
+    max_spread: float | None = None,
+    min_duration: float | None = None,
+) -> SupportCandidateSet:
+    """Keep low, quiet support candidates suitable for surface bootstrapping."""
+
+    candidate_list = candidates.candidates if isinstance(candidates, SupportCandidateSet) else list(candidates)
+    if not candidate_list:
+        return SupportCandidateSet([])
+
+    filtered = candidate_list
+    if min_duration is not None:
+        filtered = [candidate for candidate in filtered if candidate.duration >= min_duration]
+    if max_spread is not None:
+        filtered = [candidate for candidate in filtered if candidate.spread <= max_spread]
+    if not filtered:
+        return SupportCandidateSet([])
+
+    heights = np.asarray([candidate.point[up_axis] for candidate in filtered], dtype=float)
+    cutoff = float(np.quantile(heights, low_quantile))
+    filtered = [candidate for candidate in filtered if candidate.point[up_axis] <= cutoff]
+    return SupportCandidateSet(filtered)
+
+
+def bootstrap_support_surface(
+    t: ArrayLike,
+    points: ArrayLike,
+    config: SupportDetectionConfig | None = None,
+    quiet_config: QuietDetectionConfig | None = None,
+) -> tuple[SupportModel, DebugDict]:
+    """Estimate a support surface from quiet marker samples.
+
+    Returns the fitted model and a debug dictionary with intermediate candidates.
+    """
+
+    config = config or SupportDetectionConfig()
+    points = _validate_points_over_time(points)
+    candidates = find_support_candidates(t, points, quiet_config=quiet_config)
+    filtered = filter_support_candidates(
+        candidates,
+        up_axis=config.up_axis,
+        min_duration=(quiet_config.effective_min_interval_time if quiet_config else None),
+    )
+
+    candidate_points = filtered.points
+    if len(candidate_points) < config.min_support_points:
+        flattened = points.reshape(-1, 3)
+        fallback_count = min(max(config.min_support_points, 3), len(flattened))
+        order = np.argsort(flattened[:, config.up_axis])
+        candidate_points = flattened[order[:fallback_count]]
+
+    support_surface = fit_best_support_surface(candidate_points, config)
+    debug = {
+        "support_candidates": candidates,
+        "filtered_support_candidates": filtered,
+        "candidate_points": candidate_points,
+        "support_model": support_surface,
+    }
+    return support_surface, debug
+
+
 def detect_contact_intervals(
-    t,
-    points,
+    t: ArrayLike,
+    points: ArrayLike,
     config: ContactDetectionConfig | None = None,
-    orientations=None,
-    supports=None,
-    reference_force=None,
+    orientations: ArrayLike | None = None,
+    supports: SupportModel | Sequence[SupportModel] | None = None,
+    reference_force: ArrayLike | None = None,
 ) -> ContactDetectionResult:
+    """Detect contact intervals from marker motion relative to a support surface.
+
+    Parameters
+    ----------
+    t:
+        Timestamps with shape ``(N,)``.
+    points:
+        Marker positions with shape ``(N, K, 3)`` or ``(N, 3)``.
+    config:
+        Contact scoring, quiet detection, and support-model settings.
+    orientations:
+        Optional per-frame quaternions with shape ``(N, 4)`` or ``(N, K, 4)``.
+    supports:
+        Pre-fit support model(s). When omitted, the surface is bootstrapped
+        iteratively from high-confidence contact samples.
+    reference_force:
+        Optional normalized force proxy with shape ``(N,)``, ``(N, 1)``, or
+        ``(N, K)``.
+
+    Returns
+    -------
+    ContactDetectionResult
+        Frame mask, per-point scores, fitted support models, and debug metadata.
+    """
+
     config = config or ContactDetectionConfig()
     t = np.asarray(t, dtype=float)
     points = _validate_points_over_time(points)
 
-    if config.moving_support_mode and supports is None:
-        raise NotImplementedError("moving_support_mode requires explicit support poses/models in this v1 API.")
+    if config.moving_support_mode:
+        raise NotImplementedError("moving_support_mode is planned but not implemented yet")
     if t.ndim != 1:
         raise ValueError("t must be a 1D array.")
     if len(t) != points.shape[0]:
@@ -320,9 +610,11 @@ def detect_contact_intervals(
         interval_mask |= (t >= start) & (t <= end)
 
     frame_scores = np.max(final_point_scores, axis=1)
+    point_contact_mask = (final_point_scores >= config.score_on_threshold) & interval_mask[:, None]
     support_ids = np.where(interval_mask, 0, -1).astype(int)
     final_features = dict(final_features)
     final_features["point_scores"] = final_point_scores
+    final_features["point_contact_mask"] = point_contact_mask
     final_features["frame_scores"] = frame_scores
     final_features["quiet_mask"] = quiet_masks
 
@@ -338,14 +630,17 @@ def detect_contact_intervals(
             "iterations": iteration_debug,
             "config": config,
         },
+        point_mask=point_contact_mask,
     )
 
 
 def fit_support_model_from_candidates(
-    points: np.ndarray,
-    point_mask: np.ndarray,
+    points: ArrayLike,
+    point_mask: ArrayLike,
     config: SupportDetectionConfig,
 ) -> SupportModel:
+    """Fit a support model from marker samples flagged in ``point_mask``."""
+
     candidate_points = points[np.asarray(point_mask, dtype=bool)]
     if len(candidate_points) < config.min_support_points:
         fallback_count = min(max(config.min_support_points, 3), points.shape[0] * points.shape[1])
@@ -353,30 +648,47 @@ def fit_support_model_from_candidates(
         order = np.argsort(flattened[:, config.up_axis])
         candidate_points = flattened[order[:fallback_count]]
 
-    plane = PlaneSupportModel.fit(candidate_points, config)
-    residuals = np.abs(plane.clearance(candidate_points))
+    return fit_best_support_surface(candidate_points, config)
+
+
+def fit_best_support_surface(points: ArrayLike, config: SupportDetectionConfig) -> SupportModel:
+    """Choose plane vs heightmap support geometry from point coplanarity."""
+
+    points = _validate_point_cloud(points)
+    if config.model_type == "plane":
+        return PlaneSupportModel.fit(points, config)
+    if config.model_type == "heightmap":
+        return HeightmapSupportModel.fit(points, config)
+    if config.model_type == "local_heightmap":
+        return LocalPercentileHeightmap.fit(points, config)
+    if config.model_type != "auto":
+        raise ValueError(f"Unsupported support model_type: {config.model_type}")
+
+    plane = PlaneSupportModel.fit(points, config)
+    residuals = np.abs(plane.clearance(points))
     coplanar_ratio = float(np.mean(residuals <= config.plane_residual_tolerance))
     if coplanar_ratio >= config.coplanarity_ratio_threshold:
         return plane
 
-    return HeightmapSupportModel.fit(candidate_points, config)
+    return HeightmapSupportModel.fit(points, config)
 
 
 def compute_support_relative_features(
-    points: np.ndarray,
-    velocities: np.ndarray,
+    points: ArrayLike,
+    velocities: ArrayLike,
     support_model: SupportModel,
-    quiet_debug: list[dict[str, object]],
+    quiet_debug: list[DebugDict],
     config: ContactDetectionConfig,
-    t: np.ndarray | None = None,
-    orientations=None,
-    reference_force=None,
-) -> dict[str, np.ndarray]:
+    t: ArrayLike | None = None,
+    orientations: ArrayLike | None = None,
+    reference_force: ArrayLike | None = None,
+) -> dict[str, FloatArray]:
+    """Build clearance, speed, quietness, and optional auxiliary contact features."""
     n_frames, n_points, _ = points.shape
     flat_points = points.reshape(-1, 3)
     flat_velocities = velocities.reshape(-1, 3)
 
-    clearance = support_model.clearance(flat_points).reshape(n_frames, n_points)
+    raw_clearance = support_model.clearance(flat_points).reshape(n_frames, n_points)
     normals = support_model.normals_at(flat_points)
     normal_velocity = np.sum(flat_velocities * normals, axis=1).reshape(n_frames, n_points)
     tangent_velocity = flat_velocities - np.sum(flat_velocities * normals, axis=1)[:, None] * normals
@@ -384,10 +696,23 @@ def compute_support_relative_features(
 
     quiet_activity = np.column_stack([debug["activity"] for debug in quiet_debug])
     quiet_spread = np.column_stack([debug["spread"] for debug in quiet_debug])
+    quiet_mask = np.column_stack([debug["quiet_mask"] for debug in quiet_debug])
     activity_scale = np.asarray([debug["activity_off_eps"] for debug in quiet_debug], dtype=float)
     spread_scale = np.asarray([debug["spread_off_eps"] for debug in quiet_debug], dtype=float)
     activity_scale = np.where(activity_scale > 1e-12, activity_scale, 1.0)
     spread_scale = np.where(spread_scale > 1e-12, spread_scale, 1.0)
+
+    offset_limit = config.contact_offset_max
+    if offset_limit is None:
+        offset_limit = 1.5 * config.clearance_scale
+    contact_offset = np.asarray(
+        [
+            estimate_contact_offset(raw_clearance[:, point_idx], quiet_mask[:, point_idx], max_abs_offset=offset_limit)
+            for point_idx in range(n_points)
+        ],
+        dtype=float,
+    )
+    clearance = raw_clearance - contact_offset[None, :]
 
     angular_speed = np.zeros((n_frames, n_points), dtype=float)
     if orientations is not None:
@@ -406,6 +731,7 @@ def compute_support_relative_features(
         reference_contact = _normalize_reference_force(reference_force, n_frames, n_points)
 
     return {
+        "raw_clearance": raw_clearance,
         "clearance": clearance,
         "abs_clearance": np.abs(clearance),
         "normal_speed": np.abs(normal_velocity),
@@ -413,14 +739,20 @@ def compute_support_relative_features(
         "tangential_speed": tangential_speed,
         "quiet_activity": quiet_activity,
         "quiet_spread": quiet_spread,
+        "quiet_mask": quiet_mask,
         "quiet_activity_scale": activity_scale[None, :],
         "quiet_spread_scale": spread_scale[None, :],
+        "contact_offset": contact_offset,
         "angular_speed": angular_speed,
         "reference_contact": reference_contact,
     }
 
 
-def score_contact_features(features: dict[str, np.ndarray], config: ContactDetectionConfig) -> np.ndarray:
+def score_contact_features(
+    features: dict[str, FloatArray],
+    config: ContactDetectionConfig,
+) -> FloatArray:
+    """Map support-relative features to per-marker contact scores in ``[0, 1]``."""
     weights = config.feature_weights
 
     penalty = np.zeros_like(features["abs_clearance"], dtype=float)
@@ -446,11 +778,40 @@ def score_contact_features(features: dict[str, np.ndarray], config: ContactDetec
     return np.clip(scores, 0.0, 1.0)
 
 
-def _detect_point_quietness(t, points, quiet_config: QuietDetectionConfig):
+def estimate_contact_offset(
+    clearance: ArrayLike,
+    quiet_mask: ArrayLike,
+    quantile: float = 0.20,
+    max_abs_offset: float = 0.045,
+) -> float:
+    """Estimate a per-marker clearance bias from quiet, near-contact samples."""
+
+    clearance = np.asarray(clearance, dtype=float)
+    quiet_mask = np.asarray(quiet_mask, dtype=bool)
+    candidate_clearance = clearance[quiet_mask & np.isfinite(clearance)]
+    if candidate_clearance.size == 0:
+        return 0.0
+
+    low_cutoff = np.quantile(candidate_clearance, min(max(quantile, 0.0), 1.0))
+    low_clearance = candidate_clearance[candidate_clearance <= low_cutoff]
+    if low_clearance.size == 0:
+        low_clearance = candidate_clearance
+
+    offset = float(np.median(low_clearance))
+    if abs(offset) > max_abs_offset:
+        return 0.0
+    return offset
+
+
+def _detect_point_quietness(
+    t: ArrayLike,
+    points: FloatArray,
+    quiet_config: QuietDetectionConfig,
+) -> tuple[BoolArray, list[DebugDict]]:
     quiet_config = QuietDetectionConfig(
         signal_type=QuietSignalType.VECTOR_POSITION,
         vector_mode=quiet_config.vector_mode,
-        contact_min_time=quiet_config.contact_min_time,
+        min_interval_time=quiet_config.effective_min_interval_time,
         max_gap_time=quiet_config.max_gap_time,
         min_blip_time=quiet_config.min_blip_time,
         pos_smooth_time=quiet_config.pos_smooth_time,
@@ -482,11 +843,17 @@ def _detect_point_quietness(t, points, quiet_config: QuietDetectionConfig):
     return np.column_stack(masks), debug
 
 
-def _estimate_orientation_activity(orientations, t, n_points, n_frames, scalar_last=True):
+def _estimate_orientation_activity(
+    orientations: ArrayLike,
+    t: ArrayLike,
+    n_points: int,
+    n_frames: int,
+    scalar_last: bool = True,
+) -> FloatArray:
     try:
-        from .silence_detection import quaternion_angular_speed, quaternion_standardize_xyzw
+        from .quiet import quaternion_angular_speed, quaternion_standardize_xyzw
     except ImportError:  # pragma: no cover
-        from silence_detection import quaternion_angular_speed, quaternion_standardize_xyzw
+        from quiet import quaternion_angular_speed, quaternion_standardize_xyzw
 
     orientations = np.asarray(orientations, dtype=float)
     if orientations.shape == (n_frames, 4):
@@ -504,7 +871,11 @@ def _estimate_orientation_activity(orientations, t, n_points, n_frames, scalar_l
     return angular_speed
 
 
-def _normalize_reference_force(reference_force, n_frames, n_points):
+def _normalize_reference_force(
+    reference_force: ArrayLike,
+    n_frames: int,
+    n_points: int,
+) -> FloatArray:
     ref = np.asarray(reference_force, dtype=float)
     if ref.shape == (n_frames,):
         ref = ref[:, None]
@@ -522,21 +893,25 @@ def _normalize_reference_force(reference_force, n_frames, n_points):
     return np.clip(ref / high, 0.0, 1.0)
 
 
-def _normalize_supports(supports):
+def _normalize_supports(
+    supports: SupportModel | Sequence[SupportModel] | None,
+) -> list[SupportModel]:
     if supports is None:
         return []
-    if isinstance(supports, (PlaneSupportModel, HeightmapSupportModel)):
+    if isinstance(supports, (PlaneSupportModel, HeightmapSupportModel, LocalPercentileHeightmap)):
+        return [supports]
+    if hasattr(supports, "clearance") and hasattr(supports, "normals_at"):
         return [supports]
     return list(supports)
 
 
-def _squared_ratio(value, scale):
+def _squared_ratio(value: ArrayLike, scale: ArrayLike) -> FloatArray:
     scale = np.asarray(scale, dtype=float)
     scale = np.where(scale > 1e-12, scale, 1.0)
     return (value / scale) ** 2
 
 
-def _validate_points_over_time(points):
+def _validate_points_over_time(points: ArrayLike) -> FloatArray:
     points = np.asarray(points, dtype=float)
     if points.ndim == 2 and points.shape[1] == 3:
         points = points[:, None, :]
@@ -545,14 +920,20 @@ def _validate_points_over_time(points):
     return points
 
 
-def _validate_point_cloud(points):
+def _validate_point_cloud(points: ArrayLike) -> FloatArray:
     points = np.asarray(points, dtype=float)
     if points.ndim != 2 or points.shape[1] != 3:
         raise ValueError("points must have shape (M, 3).")
     return points
 
 
-def _fit_plane_svd(points, up_axis):
+def fit_plane_svd(points: ArrayLike, up_axis: int = 2) -> tuple[FloatArray, FloatArray]:
+    """Fit a plane with SVD and return ``(origin, unit_normal)``."""
+
+    return _fit_plane_svd(_validate_point_cloud(points), up_axis)
+
+
+def _fit_plane_svd(points: FloatArray, up_axis: int) -> tuple[FloatArray, FloatArray]:
     origin = np.mean(points, axis=0)
     centered = points - origin[None, :]
     _, _, vh = np.linalg.svd(centered, full_matrices=False)
@@ -561,7 +942,7 @@ def _fit_plane_svd(points, up_axis):
     return origin, normal
 
 
-def _orient_normal_up(normal, up_axis):
+def _orient_normal_up(normal: ArrayLike, up_axis: int) -> FloatArray:
     normal = np.asarray(normal, dtype=float)
     norm = np.linalg.norm(normal)
     if norm <= 1e-12:
@@ -572,7 +953,7 @@ def _orient_normal_up(normal, up_axis):
     return normal
 
 
-def _horizontal_axes(up_axis):
+def _horizontal_axes(up_axis: int) -> list[int]:
     if up_axis not in (0, 1, 2):
         raise ValueError("up_axis must be 0, 1, or 2.")
     return [axis for axis in range(3) if axis != up_axis]
