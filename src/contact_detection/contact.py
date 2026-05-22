@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, Sequence
+from typing import Protocol, Sequence
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 from scipy.spatial import cKDTree
 
+from .enums import SupportModelType, normalize_enum
 from .types import BoolArray, DebugDict, FloatArray, IntervalList
 
 from .quiet import (
@@ -27,7 +28,7 @@ from .quiet import (
 class SupportDetectionConfig:
     """Parameters for fitting ground/support geometry from quiet marker samples."""
 
-    model_type: Literal["auto", "plane", "heightmap", "local_heightmap"] = "auto"
+    model_type: SupportModelType | str = SupportModelType.AUTO
     plane_residual_tolerance: float = 0.025
     coplanarity_ratio_threshold: float = 0.85
     heightmap_cell_size: float = 0.10
@@ -41,6 +42,9 @@ class SupportDetectionConfig:
     ransac_iterations: int = 128
     random_seed: int = 17
     up_axis: int = 2
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "model_type", normalize_enum(self.model_type, SupportModelType))
 
 
 @dataclass(frozen=True)
@@ -643,14 +647,15 @@ def fit_best_support_surface(points: ArrayLike, config: SupportDetectionConfig) 
     """Choose plane vs heightmap support geometry from point coplanarity."""
 
     points = _validate_point_cloud(points)
-    if config.model_type == "plane":
+    model_type = normalize_enum(config.model_type, SupportModelType)
+    if model_type == SupportModelType.PLANE:
         return PlaneSupportModel.fit(points, config)
-    if config.model_type == "heightmap":
+    if model_type == SupportModelType.HEIGHTMAP:
         return HeightmapSupportModel.fit(points, config)
-    if config.model_type == "local_heightmap":
+    if model_type == SupportModelType.LOCAL_HEIGHTMAP:
         return LocalPercentileHeightmap.fit(points, config)
-    if config.model_type != "auto":
-        raise ValueError(f"Unsupported support model_type: {config.model_type}")
+    if model_type != SupportModelType.AUTO:
+        raise ValueError(f"Unsupported support model_type: {model_type}")
 
     plane = PlaneSupportModel.fit(points, config)
     residuals = np.abs(plane.clearance(points))

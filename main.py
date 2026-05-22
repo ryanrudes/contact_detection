@@ -10,7 +10,13 @@ from typing import Any, Iterable
 
 import yaml
 
-from contact_detection import FootSupportConfig, classify_foot_support_states, load_unified_npz
+from contact_detection import (
+    FloorModel,
+    FootSupportConfig,
+    classify_foot_support_states,
+    load_unified_npz,
+    normalize_enum,
+)
 from contact_detection.debug import plot_foot_support_states
 
 DEFAULT_CONFIG_PATH = Path("configs/config.yaml")
@@ -97,7 +103,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--board-name", default=None)
     parser.add_argument(
         "--floor-model",
-        choices=("height", "plane"),
+        choices=tuple(member.value for member in FloorModel),
         default=None,
         help="Use one scalar floor height or fit a robust floor plane from foot positions.",
     )
@@ -195,8 +201,8 @@ def build_foot_support_config(
             if cli_value is not None:
                 values[config_name] = cli_value
 
-    if values.get("floor_model", defaults.floor_model) not in ("height", "plane"):
-        raise ValueError("foot_support.floor_model must be 'height' or 'plane'.")
+    if "floor_model" in values:
+        values["floor_model"] = normalize_enum(values["floor_model"], FloorModel)
 
     return FootSupportConfig(**values)
 

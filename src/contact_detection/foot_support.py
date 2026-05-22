@@ -3,12 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import IntEnum
 from os import PathLike
-from typing import Literal, Sequence, TypeAlias
+from typing import Sequence, TypeAlias
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from .contact import PlaneSupportModel, SupportDetectionConfig
+from .enums import FloorModel, SupportModelType, normalize_enum
 from .intervals import clean_mask_by_time, intervals_from_mask
 from .quiet import local_polynomial_derivative
 from .types import BoolArray, FloatArray, IntervalList
@@ -16,7 +17,6 @@ from .types import BoolArray, FloatArray, IntervalList
 StateArray: TypeAlias = NDArray[np.int8]
 FeatureArray: TypeAlias = FloatArray | BoolArray
 StateIntervals: TypeAlias = dict[str, IntervalList]
-FloorModelKind: TypeAlias = Literal["height", "plane"]
 
 
 class FootSupportState(IntEnum):
@@ -53,7 +53,7 @@ class FootSupportConfig:
     foot_names: tuple[str, str] = ("Left_Shoe", "Right_Shoe")
     board_name: str = "Skateboard"
     up_axis: int = 2
-    floor_model: FloorModelKind = "height"
+    floor_model: FloorModel | str = FloorModel.HEIGHT
     floor_low_percentile: float = 15.0
     floor_plane_candidate_percentile: float = 50.0
     floor_plane_residual_tolerance: float = 0.025
@@ -74,6 +74,9 @@ class FootSupportConfig:
     max_gap_time: float = 0.10
     min_state_time: float = 0.12
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "floor_model", normalize_enum(self.floor_model, FloorModel))
+
 
 @dataclass
 class FootSupportClassification:
@@ -81,7 +84,7 @@ class FootSupportClassification:
 
     t: FloatArray
     states: dict[str, StateArray]
-    floor_model: FloorModelKind
+    floor_model: FloorModel
     floor_height: float
     floor_normal: FloatArray | None
     floor_origin: FloatArray | None
@@ -291,7 +294,7 @@ def load_unified_npz(
 class _FloorSurface:
     """Flat or planar floor model used by the foot-state classifier."""
 
-    model: FloorModelKind
+    model: FloorModel
     height: float
     up_axis: int
     plane: PlaneSupportModel | None = None
@@ -347,11 +350,12 @@ def _fit_floor_surface(foot_points: FloatArray, config: FootSupportConfig) -> _F
     if len(finite_points) == 0:
         raise ValueError("Cannot estimate floor from non-finite foot positions.")
 
-    if config.floor_model == "height":
+    floor_model = normalize_enum(config.floor_model, FloorModel)
+    if floor_model == FloorModel.HEIGHT:
         height = _estimate_floor_height(finite_points[:, config.up_axis], config.floor_low_percentile)
-        return _FloorSurface(model="height", height=height, up_axis=config.up_axis)
+        return _FloorSurface(model=FloorModel.HEIGHT, height=height, up_axis=config.up_axis)
 
-    if config.floor_model == "plane":
+    if floor_model == FloorModel.PLANE:
         cutoff = np.percentile(finite_points[:, config.up_axis], config.floor_plane_candidate_percentile)
         candidate_points = finite_points[finite_points[:, config.up_axis] <= cutoff]
         if len(candidate_points) < 3:
@@ -359,17 +363,17 @@ def _fit_floor_surface(foot_points: FloatArray, config: FootSupportConfig) -> _F
         if len(candidate_points) < 3:
             raise ValueError("Need at least 3 finite foot positions to fit a floor plane.")
         support_config = SupportDetectionConfig(
-            model_type="plane",
+            model_type=SupportModelType.PLANE,
             plane_residual_tolerance=config.floor_plane_residual_tolerance,
             ransac_iterations=config.floor_plane_ransac_iterations,
             random_seed=config.floor_plane_random_seed,
             up_axis=config.up_axis,
         )
         plane = PlaneSupportModel.fit(candidate_points, support_config)
-        height = float(np.median(_FloorSurface("plane", 0.0, config.up_axis, plane).height_at(finite_points)))
-        return _FloorSurface(model="plane", height=height, up_axis=config.up_axis, plane=plane)
+        height = float(np.median(_FloorSurface(FloorModel.PLANE, 0.0, config.up_axis, plane).height_at(finite_points)))
+        return _FloorSurface(model=FloorModel.PLANE, height=height, up_axis=config.up_axis, plane=plane)
 
-    raise ValueError(f"Unsupported floor_model: {config.floor_model!r}")
+    raise ValueError(f"Unsupported floor_model: {floor_model!r}")
 
 
 def _estimate_floor_height(foot_heights: FloatArray, low_percentile: float) -> float:

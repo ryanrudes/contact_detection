@@ -29,6 +29,8 @@ outputs/
 outputs_*/
 *.npz
 *.png
+!assets/
+!assets/**
 
 # Local scratch scripts
 inspect*.py

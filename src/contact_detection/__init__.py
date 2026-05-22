@@ -30,6 +30,13 @@ from .contact import (
     score_contact_features,
 )
 from .intervals import IntervalSummary, mask_from_intervals, summarize_intervals
+from .enums import (
+    FloorModel,
+    QuietSignalType,
+    SupportModelType,
+    VectorQuietMode,
+    normalize_enum,
+)
 from .foot_support import (
     FootSupportClassification,
     FootSupportConfig,
@@ -41,8 +48,6 @@ from .foot_support import (
 from .quiet import (
     QuietDetectionConfig,
     QuietDetectionResult,
-    QuietSignalType,
-    VectorQuietMode,
     clean_mask_by_time,
     compute_quiet_activity_and_spread,
     detect_quiet_intervals,
@@ -62,6 +67,7 @@ from .quiet import (
 __all__ = [
     "ContactDetectionConfig",
     "ContactDetectionResult",
+    "FloorModel",
     "FootSupportClassification",
     "FootSupportConfig",
     "FootSupportState",
@@ -76,6 +82,7 @@ __all__ = [
     "SupportCandidateSet",
     "SupportDetectionConfig",
     "SupportModel",
+    "SupportModelType",
     "VectorQuietMode",
     "bootstrap_support_surface",
     "classify_foot_support_states",
@@ -95,6 +102,7 @@ __all__ = [
     "local_polynomial_derivative",
     "load_unified_npz",
     "mask_from_intervals",
+    "normalize_enum",
     "quaternion_angular_speed",
     "quaternion_local_spread",
     "quaternion_standardize_xyzw",

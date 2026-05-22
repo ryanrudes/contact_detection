@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
-from typing import Iterator, TypeVar
+from typing import Iterator
 
 import numpy as np
 from numpy.typing import ArrayLike
 from scipy.ndimage import gaussian_filter1d, maximum_filter1d, minimum_filter1d, uniform_filter1d
 from scipy.spatial.transform import Rotation as Rotation
 
+from .enums import QuietSignalType, VectorQuietMode, normalize_enum
 from .types import BoolArray, DebugDict, FloatArray, IntervalList
-
-_E = TypeVar("_E", bound=Enum)
 
 DEFAULT_MIN_INTERVAL_TIME = 0.18  # not 1.0 unless detecting standing
 MAX_GAP_TIME = 0.10          # fill tiny holes
@@ -35,32 +33,12 @@ Z_RANGE_ON_EPS = 0.006         # meters
 Z_RANGE_OFF_EPS = 0.018        # meters
 
 
-class QuietSignalType(Enum):
-    """Input signal layout accepted by the quiet detector."""
-
-    SCALAR = "scalar"
-    POSITION_COMPONENT = "position_component"
-    VECTOR_POSITION = "vector_position"
-    VECTOR = "vector"
-    QUATERNION = "quaternion"
-
-
-class VectorQuietMode(Enum):
-    """How vector signals are reduced to scalar activity and spread metrics."""
-
-    NORM = "norm"
-    EUCLIDEAN = "euclidean"
-    MAX_COMPONENT = "max_component"
-    NORMALIZED_NORM = "normalized_norm"
-    MAHALANOBIS = "mahalanobis"
-
-
 @dataclass(frozen=True)
 class QuietDetectionConfig:
     """Smoothing windows, hysteresis thresholds, and signal-type options."""
 
-    signal_type: QuietSignalType = QuietSignalType.SCALAR
-    vector_mode: VectorQuietMode = VectorQuietMode.NORM
+    signal_type: QuietSignalType | str = QuietSignalType.SCALAR
+    vector_mode: VectorQuietMode | str = VectorQuietMode.NORM
     min_interval_time: float = DEFAULT_MIN_INTERVAL_TIME
     max_gap_time: float = MAX_GAP_TIME
     min_blip_time: float = MIN_BLIP_TIME
@@ -81,6 +59,11 @@ class QuietDetectionConfig:
     use_time_gaussian_smoothing: bool = True
     use_time_windows: bool = True
     quaternion_scalar_last: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "signal_type", normalize_enum(self.signal_type, QuietSignalType))
+        object.__setattr__(self, "vector_mode", normalize_enum(self.vector_mode, VectorQuietMode))
+
 
 @dataclass
 class QuietDetectionResult:
@@ -286,13 +269,6 @@ def ensure_2d_signal(X: ArrayLike) -> tuple[FloatArray, bool]:
         raise ValueError("X must have shape (N,) or (N, D).")
 
     return X, scalar_input
-
-
-def normalize_enum(value: str | _E, enum_cls: type[_E]) -> _E:
-    """Coerce a string or enum member to ``enum_cls``."""
-    if isinstance(value, enum_cls):
-        return value
-    return enum_cls(value)
 
 
 def time_gaussian_smooth(
