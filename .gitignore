@@ -5,6 +5,30 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 # Virtual environments
 .venv
+.venv/
+venv/
+env/
+
+# Local editor and tool state
+.cursor/
+.vscode/
+.idea/
+.DS_Store
+
+# Local trial data and generated plots
+data/
+outputs/
+outputs_*/
+*.npz
+*.png
+
+# Local scratch scripts
+inspect*.py
