@@ -57,7 +57,7 @@ python main.py --config configs/config.yaml
 
 ![Per-foot air, ground, and skateboard states from pushoff5_twoshoes](assets/pushoff5_twoshoes_foot_support_states.png)
 
-`main.py` scans for `*/unified.npz` files containing `t`,
+`main.py` scans for `*/synced.npz` files containing `t`,
 `vicon__body_names`, and `vicon__body_pos`, then writes
 `outputs/<trial>_foot_support_states.png` with per-foot `air`, `ground`, and
 `skateboard` annotations. The YAML config controls input/output paths, body
@@ -79,8 +79,8 @@ The default runtime config is `configs/config.yaml`. It controls:
 - ground and skateboard contact thresholds
 - temporal cleanup windows
 
-Trial recordings are intentionally not versioned. Put local `unified.npz` files
-under `data/<trial>/unified.npz`; generated diagnostic plots are written to
+Trial recordings are intentionally not versioned. Put local `synced.npz` files
+under `data/<trial>/synced.npz`; generated diagnostic plots are written to
 `outputs/` by default. Both directories are ignored by git.
 
 ## Public API
