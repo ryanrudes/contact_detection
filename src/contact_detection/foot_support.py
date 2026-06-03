@@ -19,7 +19,13 @@ StateIntervals: TypeAlias = dict[str, IntervalList]
 
 
 class FootSupportState(IntEnum):
-    """Per-frame support state for a tracked foot or contact point."""
+    """Per-frame support state for a tracked foot or contact point.
+
+    Attributes:
+        AIR (int): Foot is airborne (no ground or board contact).
+        GROUND (int): Foot contacts the calibrated floor support surface.
+        SKATEBOARD (int): Foot contacts the skateboard deck (horizontal proximity and low relative motion).
+    """
 
     AIR = 0
     GROUND = 1
