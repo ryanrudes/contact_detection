@@ -8,7 +8,6 @@ from contact_detection import (
     FootSupportConfig,
     FootSupportState,
     classify_foot_support_states,
-    load_unified_npz,
 )
 
 
@@ -47,21 +46,36 @@ class FootSupportClassificationTests(unittest.TestCase):
         self.assertTrue(np.all(right_states[t > 2.2] == FootSupportState.AIR))
         self.assertIn("skateboard", classification.intervals["Right_Shoe"])
 
-    def test_load_unified_npz_uses_vicon_schema_and_valid_mask(self):
-        with TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "unified.npz"
-            np.savez(
-                path,
-                t=np.array([10.0, 10.1, 10.2]),
-                vicon__body_names=np.array(["Left_Shoe", "Right_Shoe", "Skateboard"], dtype=object),
-                vicon__body_pos=np.zeros((3, 3, 3), dtype=float),
-                valid=np.array([True, False, True]),
-            )
+    def test_sync_clip_export_respects_valid_mask(self):
+        try:
+            from motion_sync.synced_dataset import SyncClip
+        except ImportError:
+            self.skipTest("install twofoot retargeting (with pydantic) to run this test")
 
-            t, body_names, body_pos, _ = load_unified_npz(path)
+        with TemporaryDirectory() as tmpdir:
+            demo_dir = Path(tmpdir) / "demo"
+            SyncClip(
+                time_s=np.array([10.0, 10.1, 10.2]),
+                vicon={
+                    "body_names": ("Left_Shoe", "Right_Shoe", "Skateboard"),
+                    "body_positions": np.zeros((3, 3, 3), dtype=float),
+                },
+                video={
+                    "joints": np.zeros((3, 2, 3)),
+                    "transl": np.zeros((3, 3)),
+                    "global_orient": np.zeros((3, 3)),
+                    "body_pose": np.zeros((3, 63)),
+                    "betas": np.zeros((3, 10)),
+                },
+                metadata={"lag_s": 0.0},
+                valid=np.array([True, False, True]),
+            ).save(demo_dir)
+
+            clip = SyncClip.load(demo_dir)
+            t, body_names, body_pos = clip.export_vicon_bodies()
 
         np.testing.assert_allclose(t, [0.0, 0.2])
-        self.assertEqual(body_names, ["Left_Shoe", "Right_Shoe", "Skateboard"])
+        self.assertEqual(list(body_names), ["Left_Shoe", "Right_Shoe", "Skateboard"])
         self.assertEqual(body_pos.shape, (2, 3, 3))
 
     def test_floor_plane_model_handles_tilted_floor(self):

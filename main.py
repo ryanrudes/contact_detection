@@ -14,7 +14,6 @@ from contact_detection import (
     FloorModel,
     FootSupportConfig,
     classify_foot_support_states,
-    load_unified_npz,
     normalize_enum,
 )
 from contact_detection.debug import plot_foot_support_states
@@ -34,18 +33,27 @@ def main(argv: Sequence[str] | None = None) -> None:
     output_arg = Path(output_value) if output_value is not None else None
     show_plot = bool(_resolve_config_value(args.show, config_data, "plot", "show", False))
 
-    input_paths = _find_unified_inputs(input_path)
+    input_paths = _find_synced_inputs(input_path)
     config = build_foot_support_config(config_data, args)
 
     matplotlib_cache = Path(tempfile.gettempdir()) / "event_detection_matplotlib"
     matplotlib_cache.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("MPLCONFIGDIR", str(matplotlib_cache))
 
+    try:
+        from motion_sync import SyncClip
+    except ImportError as exc:
+        raise SystemExit(
+            "Install motion-sync to load synced clips "
+            "(e.g. uv pip install -e ../motion-sync)."
+        ) from exc
+
     for input_path in input_paths:
         output_path = _output_path_for(input_path, input_paths, output_arg)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        t, body_names, body_pos, _ = load_unified_npz(input_path)
+        clip = SyncClip.load(input_path)
+        t, body_names, body_pos = clip.export_vicon_bodies()
         classification = classify_foot_support_states(t, body_names, body_pos, config=config)
 
         plot_foot_support_states(
@@ -77,7 +85,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     """Create the command-line parser for config-driven trial plotting."""
 
     parser = argparse.ArgumentParser(
-        description="Plot per-foot support state annotations for unified Vicon/video NPZ data."
+        description="Plot per-foot support state annotations for twofoot synced clips."
     )
     parser.add_argument(
         "--config",
@@ -88,7 +96,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "input",
         nargs="?",
         default=None,
-        help="Path to a unified.npz file or a directory containing trial */unified.npz files.",
+        help="Path to synced.npz or a directory tree of */synced.npz demos.",
     )
     parser.add_argument(
         "--output",
@@ -257,20 +265,20 @@ def _coerce_foot_names(value: Any) -> tuple[str, str]:
     return names
 
 
-def _find_unified_inputs(input_path: Path) -> list[Path]:
-    """Return one or more unified NPZ paths from a file or directory input."""
+def _find_synced_inputs(input_path: Path) -> list[Path]:
+    """Return one or more synced.npz paths from a file or directory input."""
 
     if input_path.is_dir():
-        paths = sorted(input_path.rglob("unified.npz"))
-    elif input_path.name == "unified.npz" and input_path.is_file():
+        paths = sorted(input_path.rglob("synced.npz"))
+    elif input_path.name == "synced.npz" and input_path.is_file():
         paths = [input_path]
     elif input_path.is_file():
-        raise ValueError(f"Expected a unified.npz file, got {input_path}")
+        raise ValueError(f"Expected synced.npz, got {input_path}")
     else:
         raise FileNotFoundError(input_path)
 
     if not paths:
-        raise FileNotFoundError(f"No unified.npz files found under {input_path}")
+        raise FileNotFoundError(f"No synced.npz files found under {input_path}")
     return paths
 
 
