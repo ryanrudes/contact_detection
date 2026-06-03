@@ -9,7 +9,18 @@ _E = TypeVar("_E", bound=StrEnum)
 
 
 def normalize_enum(value: str | _E, enum_cls: type[_E]) -> _E:
-    """Coerce an enum member or its string value to ``enum_cls``."""
+    """Coerce an enum member or its string value to ``enum_cls``.
+
+    Args:
+        value: Enum member or string value accepted by ``enum_cls``.
+        enum_cls: Target :class:`enum.StrEnum` subclass.
+
+    Returns:
+        The resolved enum member.
+
+    Raises:
+        ValueError: If ``value`` is not a member of ``enum_cls``.
+    """
 
     if isinstance(value, enum_cls):
         return value

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
@@ -11,7 +12,19 @@ from .types import BoolArray, IntervalList
 
 @dataclass
 class IntervalSummary:
-    """Per-interval statistics for a multivariate time series."""
+    """Per-interval descriptive statistics for a multivariate time series.
+
+    Attributes:
+        start (float): Interval start time (seconds).
+        end (float): Interval end time (seconds).
+        duration (float): ``end - start``.
+        median (NDArray[np.float64]): Per-channel median inside the interval.
+        mean (NDArray[np.float64]): Per-channel mean inside the interval.
+        std (NDArray[np.float64]): Per-channel standard deviation inside the interval.
+        min (NDArray[np.float64]): Per-channel minimum inside the interval.
+        max (NDArray[np.float64]): Per-channel maximum inside the interval.
+        n_samples (int): Number of frames included in the interval.
+    """
 
     start: float
     end: float
@@ -31,20 +44,16 @@ def intervals_from_mask(
 ) -> IntervalList:
     """Convert a boolean mask into ``(start, end)`` time intervals.
 
-    Parameters
-    ----------
-    t:
-        Timestamps with shape ``(N,)``.
-    mask:
-        Boolean mask with shape ``(N,)``.
-    min_duration:
-        Drop intervals shorter than this many seconds.
+    Args:
+        t: Timestamps with shape ``(N,)``.
+        mask: Boolean mask with shape ``(N,)``.
+        min_duration: Drop intervals shorter than this many seconds.
 
-    Returns
-    -------
-    list[tuple[float, float]]
-        Contiguous runs where ``mask`` is True, expressed in the same time
-        units as ``t``.
+    Returns:
+        Contiguous runs where ``mask`` is True, using the same time units as ``t``.
+
+    Raises:
+        ValueError: If ``t`` and ``mask`` are not 1D or have different lengths.
     """
 
     t = np.asarray(t, dtype=float)
@@ -72,7 +81,15 @@ def intervals_from_mask(
 
 
 def mask_from_intervals(t: ArrayLike, intervals: IntervalList) -> BoolArray:
-    """Build a per-sample mask that is True inside any of the given intervals."""
+    """Build a per-sample mask that is True inside any of the given intervals.
+
+    Args:
+        t: Timestamps with shape ``(N,)``.
+        intervals: Closed intervals ``(start, end)`` in the same time units as ``t``.
+
+    Returns:
+        Boolean mask with shape ``(N,)``.
+    """
 
     t = np.asarray(t, dtype=float)
     mask = np.zeros(len(t), dtype=bool)
@@ -109,7 +126,16 @@ def _run_durations(
 
 
 def fill_short_false_runs(t: ArrayLike, mask: ArrayLike, max_gap_time: float) -> BoolArray:
-    """Fill brief False gaps surrounded by True runs (hole filling)."""
+    """Fill brief False gaps surrounded by True runs (hole filling).
+
+    Args:
+        t: Timestamps with shape ``(N,)``.
+        mask: Boolean mask with shape ``(N,)``.
+        max_gap_time: Maximum False-run duration to fill when not touching series edges.
+
+    Returns:
+        Copy of ``mask`` with qualifying interior False runs set to True.
+    """
 
     cleaned = np.asarray(mask, dtype=bool).copy()
     if max_gap_time <= 0.0:
@@ -122,7 +148,16 @@ def fill_short_false_runs(t: ArrayLike, mask: ArrayLike, max_gap_time: float) ->
 
 
 def remove_short_true_runs(t: ArrayLike, mask: ArrayLike, min_duration: float) -> BoolArray:
-    """Remove brief True blips shorter than ``min_duration`` seconds."""
+    """Remove brief True blips shorter than ``min_duration`` seconds.
+
+    Args:
+        t: Timestamps with shape ``(N,)``.
+        mask: Boolean mask with shape ``(N,)``.
+        min_duration: True runs shorter than this are cleared.
+
+    Returns:
+        Copy of ``mask`` with short True blips removed.
+    """
 
     cleaned = np.asarray(mask, dtype=bool).copy()
     if min_duration <= 0.0:
@@ -139,7 +174,17 @@ def clean_mask_by_time(
     max_gap_time: float = 0.10,
     min_blip_time: float = 0.15,
 ) -> BoolArray:
-    """Fill short gaps then remove short contact blips."""
+    """Fill short gaps then remove short True blips.
+
+    Args:
+        t: Timestamps with shape ``(N,)``.
+        mask: Boolean mask with shape ``(N,)``.
+        max_gap_time: Passed to :func:`fill_short_false_runs`.
+        min_blip_time: Passed to :func:`remove_short_true_runs`.
+
+    Returns:
+        Temporally cleaned boolean mask with shape ``(N,)``.
+    """
 
     cleaned = fill_short_false_runs(t, mask, max_gap_time)
     return remove_short_true_runs(t, cleaned, min_blip_time)
@@ -150,7 +195,19 @@ def summarize_intervals(
     X: ArrayLike,
     intervals: IntervalList,
 ) -> list[IntervalSummary]:
-    """Compute descriptive statistics for ``X`` inside each time interval."""
+    """Compute descriptive statistics for ``X`` inside each time interval.
+
+    Args:
+        t: Timestamps with shape ``(N,)``.
+        X: Multivariate samples with shape ``(N,)`` or ``(N, D)``.
+        intervals: Closed intervals ``(start, end)`` in the same time units as ``t``.
+
+    Returns:
+        One :class:`IntervalSummary` per non-empty interval (empty intervals are skipped).
+
+    Raises:
+        ValueError: If ``t`` and ``X`` have different lengths.
+    """
 
     t = np.asarray(t, dtype=float)
     X = np.asarray(X, dtype=float)

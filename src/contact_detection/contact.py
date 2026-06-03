@@ -26,7 +26,24 @@ from .quiet import (
 
 @dataclass(frozen=True)
 class SupportDetectionConfig:
-    """Parameters for fitting ground/support geometry from quiet marker samples."""
+    """Parameters for fitting ground/support geometry from quiet marker samples.
+
+    Attributes:
+        model_type (SupportModelType | str): Plane, heightmap, local heightmap, or auto.
+        plane_residual_tolerance (float): RANSAC / inlier distance threshold (meters).
+        coplanarity_ratio_threshold (float): Fraction of inliers required to prefer a plane.
+        heightmap_cell_size (float): XY grid cell size for the global heightmap (meters).
+        heightmap_quantile (float): Per-cell height quantile in ``[0, 1]``.
+        local_heightmap_radius (float): Neighborhood radius for local heightmap (meters).
+        local_heightmap_quantile (float): Neighborhood height quantile in ``[0, 1]``.
+        local_heightmap_min_neighbors (int): Minimum neighbors before nearest fallback.
+        min_support_points (int): Minimum points required to fit a surface.
+        max_bootstrap_iterations (int): Iterations when bootstrapping inside contact detection.
+        convergence_tolerance (float): Stop when the frame mask change rate falls below this.
+        ransac_iterations (int): RANSAC trials for plane fitting.
+        random_seed (int): RNG seed for RANSAC sampling.
+        up_axis (int): World-axis index treated as vertical (0, 1, or 2).
+    """
 
     model_type: SupportModelType | str = SupportModelType.AUTO
     plane_residual_tolerance: float = 0.025
@@ -49,7 +66,24 @@ class SupportDetectionConfig:
 
 @dataclass(frozen=True)
 class ContactDetectionConfig:
-    """Thresholds and feature weights for contact scoring and mask cleanup."""
+    """Thresholds and feature weights for contact scoring and mask cleanup.
+
+    Attributes:
+        quiet_config (QuietDetectionConfig): Per-marker quiet detection settings.
+        support_config (SupportDetectionConfig): Support-surface fitting settings.
+        feature_weights (dict[str, float]): Penalty weights for :func:`score_contact_features`.
+        clearance_scale (float): Scale for clearance penalty (meters).
+        contact_offset_max (float | None): Cap on per-marker clearance bias; ``None`` auto.
+        normal_speed_scale (float): Scale for normal velocity penalty (m/s).
+        tangential_speed_scale (float): Scale for tangential speed penalty (m/s).
+        angular_speed_scale (float): Scale for angular speed penalty (rad/s).
+        score_on_threshold (float): Hysteresis on-threshold for frame scores.
+        score_off_threshold (float): Hysteresis off-threshold for frame scores.
+        min_contact_time (float): Minimum contact interval duration (seconds).
+        max_gap_time (float): Max gap to fill in the contact mask (seconds).
+        min_blip_time (float): Min blip duration to keep as contact (seconds).
+        moving_support_mode (bool): Reserved; not implemented yet.
+    """
 
     quiet_config: QuietDetectionConfig = field(
         default_factory=lambda: QuietDetectionConfig(
@@ -88,7 +122,18 @@ class ContactDetectionConfig:
 
 @dataclass
 class ContactDetectionResult:
-    """Output of frame-level contact detection on a marker point cloud."""
+    """Output of frame-level contact detection on a marker point cloud.
+
+    Attributes:
+        intervals (IntervalList): Contiguous contact intervals in time.
+        mask (BoolArray): Frame-level contact mask with shape ``(N,)``.
+        scores (FloatArray): Frame contact scores in ``[0, 1]`` with shape ``(N,)``.
+        support_ids (NDArray[np.int_]): Support index per frame (``-1`` when not in contact).
+        features (dict[str, FloatArray]): Support-relative features and per-marker scores.
+        support_models (list[SupportModel]): Fitted support geometry (usually one model).
+        debug (DebugDict): Quiet masks, bootstrap iterations, and configuration snapshots.
+        point_mask (BoolArray | None): Per-marker contact mask with shape ``(N, K)``.
+    """
 
     intervals: IntervalList
     mask: BoolArray
@@ -101,22 +146,50 @@ class ContactDetectionResult:
 
 
 class SupportModel(Protocol):
-    """Protocol for geometry that exposes clearance and surface normals."""
+    """Protocol for geometry that exposes clearance and surface normals.
+
+    Attributes:
+        name (str): Short model label (for example ``"plane"`` or ``"heightmap"``).
+    """
 
     name: str
 
     def clearance(self, points: ArrayLike) -> FloatArray:
-        """Signed distance above the support surface (positive = above)."""
+        """Signed distance above the support surface (positive = above).
+
+        Args:
+            points: Query positions with shape ``(M, 3)``.
+
+        Returns:
+            Clearance values with shape ``(M,)``.
+        """
         ...
 
     def normals_at(self, points: ArrayLike) -> FloatArray:
-        """Unit surface normal at each query point."""
+        """Unit surface normal at each query point.
+
+        Args:
+            points: Query positions with shape ``(M, 3)``.
+
+        Returns:
+            Unit normals with shape ``(M, 3)``.
+        """
         ...
 
 
 @dataclass
 class SupportCandidate:
-    """A quiet interval summarized as a single 3D support sample."""
+    """A quiet interval summarized as a single 3D support sample.
+
+    Attributes:
+        point (FloatArray): Median 3D position inside the quiet interval.
+        keypoint_index (int): Marker index within the ``(N, K, 3)`` point cloud.
+        start (float): Interval start time (seconds).
+        end (float): Interval end time (seconds).
+        duration (float): ``end - start``.
+        spread (float): Median quiet spread inside the interval.
+        activity (float): Median quiet activity inside the interval.
+    """
 
     point: FloatArray
     keypoint_index: int
@@ -129,13 +202,21 @@ class SupportCandidate:
 
 @dataclass
 class SupportCandidateSet:
-    """Collection of support candidates gathered from per-marker quiet intervals."""
+    """Collection of support candidates gathered from per-marker quiet intervals.
+
+    Attributes:
+        candidates (list[SupportCandidate]): One entry per qualifying quiet interval.
+    """
 
     candidates: list[SupportCandidate]
 
     @property
     def points(self) -> FloatArray:
-        """Stack candidate points into an ``(M, 3)`` array."""
+        """Stack candidate points into an ``(M, 3)`` array.
+
+        Returns:
+            Candidate positions with shape ``(M, 3)``, or empty ``(0, 3)`` when none.
+        """
         if not self.candidates:
             return np.empty((0, 3), dtype=float)
         return np.asarray([candidate.point for candidate in self.candidates], dtype=float)
@@ -143,7 +224,15 @@ class SupportCandidateSet:
 
 @dataclass
 class PlaneSupportModel:
-    """Planar support surface fit with RANSAC refinement."""
+    """Planar support surface fit with RANSAC refinement.
+
+    Attributes:
+        normal (FloatArray): Unit plane normal with shape ``(3,)``.
+        origin (FloatArray): Point on the plane with shape ``(3,)``.
+        residuals (FloatArray | None): Signed distances at fit time, shape ``(M,)``.
+        inlier_mask (BoolArray | None): Inlier flags from the final fit.
+        name (str): Model label (default ``"plane"``).
+    """
 
     normal: FloatArray
     origin: FloatArray
@@ -153,6 +242,18 @@ class PlaneSupportModel:
 
     @classmethod
     def fit(cls, points: ArrayLike, config: SupportDetectionConfig) -> PlaneSupportModel:
+        """Fit a plane with RANSAC then SVD refinement.
+
+        Args:
+            points: Support samples with shape ``(M, 3)``.
+            config: Plane fitting and RANSAC parameters.
+
+        Returns:
+            Fitted :class:`PlaneSupportModel`.
+
+        Raises:
+            ValueError: If fewer than three points are provided.
+        """
         points = _validate_point_cloud(points)
         if len(points) < 3:
             raise ValueError("Need at least 3 points to fit a plane.")
@@ -187,17 +288,29 @@ class PlaneSupportModel:
         return cls(normal=normal, origin=origin, residuals=residuals, inlier_mask=inlier_mask)
 
     def clearance(self, points: ArrayLike) -> FloatArray:
+        """Signed distance along the fitted plane normal (positive = above)."""
+
         points = np.asarray(points, dtype=float)
         return (points - self.origin) @ self.normal
 
     def normals_at(self, points: ArrayLike) -> FloatArray:
+        """Return the plane normal replicated for each query point."""
+
         points = np.asarray(points, dtype=float)
         return np.broadcast_to(self.normal, points.shape).copy()
 
 
 @dataclass
 class HeightmapSupportModel:
-    """Piecewise height field on a regular XY grid."""
+    """Piecewise height field on a regular XY grid.
+
+    Attributes:
+        cell_size (float): XY grid cell size (meters).
+        cells_xy (FloatArray): Cell centers with shape ``(C, 2)`` in the horizontal plane.
+        heights (FloatArray): Support height per cell with shape ``(C,)``.
+        up_axis (int): World-axis index treated as vertical.
+        name (str): Model label (default ``"heightmap"``).
+    """
 
     cell_size: float
     cells_xy: FloatArray
@@ -208,6 +321,18 @@ class HeightmapSupportModel:
 
     @classmethod
     def fit(cls, points: ArrayLike, config: SupportDetectionConfig) -> HeightmapSupportModel:
+        """Fit a gridded heightmap from support samples.
+
+        Args:
+            points: Support samples with shape ``(M, 3)``.
+            config: Heightmap grid and quantile settings.
+
+        Returns:
+            Fitted :class:`HeightmapSupportModel`.
+
+        Raises:
+            ValueError: If no points are provided or ``heightmap_cell_size`` is invalid.
+        """
         points = _validate_point_cloud(points)
         if len(points) < 1:
             raise ValueError("Need at least 1 point to fit a heightmap.")
@@ -248,12 +373,16 @@ class HeightmapSupportModel:
         return self.heights[idx]
 
     def clearance(self, points: ArrayLike) -> FloatArray:
+        """Vertical distance above the gridded support height at each XY cell."""
+
         points = np.asarray(points, dtype=float)
         horizontal_axes = _horizontal_axes(self.up_axis)
         support_height = self._height_at_xy(points[:, horizontal_axes])
         return points[:, self.up_axis] - support_height
 
     def normals_at(self, points: ArrayLike) -> FloatArray:
+        """Return unit normals aligned with the configured up axis."""
+
         points = np.asarray(points, dtype=float)
         normals = np.zeros_like(points, dtype=float)
         normals[:, self.up_axis] = 1.0
@@ -262,7 +391,16 @@ class HeightmapSupportModel:
 
 @dataclass
 class LocalPercentileHeightmap:
-    """Neighborhood percentile height field for uneven terrain."""
+    """Neighborhood percentile height field for uneven terrain.
+
+    Attributes:
+        points (FloatArray): Support samples with shape ``(M, 3)``.
+        radius (float): Horizontal neighborhood radius (meters).
+        quantile (float): Height quantile within each neighborhood.
+        min_neighbors (int): Minimum neighbors before nearest-point fallback.
+        up_axis (int): World-axis index treated as vertical.
+        name (str): Model label (default ``"local_heightmap"``).
+    """
 
     points: FloatArray
     radius: float
@@ -274,6 +412,18 @@ class LocalPercentileHeightmap:
 
     @classmethod
     def fit(cls, points: ArrayLike, config: SupportDetectionConfig) -> LocalPercentileHeightmap:
+        """Fit a local percentile height field.
+
+        Args:
+            points: Support samples with shape ``(M, 3)``.
+            config: Local heightmap radius, quantile, and neighbor settings.
+
+        Returns:
+            Fitted :class:`LocalPercentileHeightmap`.
+
+        Raises:
+            ValueError: If no points are provided or ``local_heightmap_radius`` is invalid.
+        """
         points = _validate_point_cloud(points)
         if len(points) < 1:
             raise ValueError("Need at least 1 point to fit a local heightmap.")
@@ -312,13 +462,17 @@ class LocalPercentileHeightmap:
 
         return heights
 
-    def clearance(self, points: np.ndarray) -> np.ndarray:
+    def clearance(self, points: ArrayLike) -> FloatArray:
+        """Vertical distance above the local percentile support height."""
+
         points = np.asarray(points, dtype=float)
         horizontal_axes = _horizontal_axes(self.up_axis)
         support_height = self._height_at_xy(points[:, horizontal_axes])
         return points[:, self.up_axis] - support_height
 
-    def normals_at(self, points: np.ndarray) -> np.ndarray:
+    def normals_at(self, points: ArrayLike) -> FloatArray:
+        """Return unit normals aligned with the configured up axis."""
+
         points = np.asarray(points, dtype=float)
         normals = np.zeros_like(points, dtype=float)
         normals[:, self.up_axis] = 1.0
@@ -333,20 +487,13 @@ def find_support_candidates(
 ) -> SupportCandidateSet:
     """Find quiet intervals per marker and summarize each as a support candidate.
 
-    Parameters
-    ----------
-    t:
-        Timestamps with shape ``(N,)``.
-    points:
-        Marker positions with shape ``(N, K, 3)`` or ``(N, 3)``.
-    quiet_config:
-        Quiet-detection settings applied independently to each marker.
-    min_duration:
-        Override minimum quiet interval length; defaults to the config value.
+    Args:
+        t: Timestamps with shape ``(N,)``.
+        points: Marker positions with shape ``(N, K, 3)`` or ``(N, 3)``.
+        quiet_config: Quiet-detection settings applied independently to each marker.
+        min_duration: Override minimum quiet interval length; defaults to the config value.
 
-    Returns
-    -------
-    SupportCandidateSet
+    Returns:
         One candidate per qualifying quiet interval and marker.
     """
 
@@ -416,7 +563,18 @@ def filter_support_candidates(
     max_spread: float | None = None,
     min_duration: float | None = None,
 ) -> SupportCandidateSet:
-    """Keep low, quiet support candidates suitable for surface bootstrapping."""
+    """Keep low, quiet support candidates suitable for surface bootstrapping.
+
+    Args:
+        candidates: Candidate set or sequence to filter.
+        up_axis: Vertical axis index used for height filtering.
+        low_quantile: Keep candidates at or below this height quantile.
+        max_spread: When set, drop candidates with spread above this value.
+        min_duration: When set, drop candidates shorter than this duration.
+
+    Returns:
+        Filtered :class:`SupportCandidateSet` (possibly empty).
+    """
 
     candidate_list = candidates.candidates if isinstance(candidates, SupportCandidateSet) else list(candidates)
     if not candidate_list:
@@ -444,7 +602,15 @@ def bootstrap_support_surface(
 ) -> tuple[SupportModel, DebugDict]:
     """Estimate a support surface from quiet marker samples.
 
-    Returns the fitted model and a debug dictionary with intermediate candidates.
+    Args:
+        t: Timestamps with shape ``(N,)``.
+        points: Marker positions with shape ``(N, K, 3)`` or ``(N, 3)``.
+        config: Support-surface fitting parameters.
+        quiet_config: Quiet detection used to find support candidates.
+
+    Returns:
+        A ``(support_model, debug)`` pair. ``debug`` contains raw and filtered
+        candidates, candidate points, and the fitted model.
     """
 
     config = config or SupportDetectionConfig()
@@ -483,27 +649,22 @@ def detect_contact_intervals(
 ) -> ContactDetectionResult:
     """Detect contact intervals from marker motion relative to a support surface.
 
-    Parameters
-    ----------
-    t:
-        Timestamps with shape ``(N,)``.
-    points:
-        Marker positions with shape ``(N, K, 3)`` or ``(N, 3)``.
-    config:
-        Contact scoring, quiet detection, and support-model settings.
-    orientations:
-        Optional per-frame quaternions with shape ``(N, 4)`` or ``(N, K, 4)``.
-    supports:
-        Pre-fit support model(s). When omitted, the surface is bootstrapped
-        iteratively from high-confidence contact samples.
-    reference_force:
-        Optional normalized force proxy with shape ``(N,)``, ``(N, 1)``, or
-        ``(N, K)``.
+    Args:
+        t: Timestamps with shape ``(N,)``.
+        points: Marker positions with shape ``(N, K, 3)`` or ``(N, 3)``.
+        config: Contact scoring, quiet detection, and support-model settings.
+        orientations: Optional per-frame quaternions with shape ``(N, 4)`` or ``(N, K, 4)``.
+        supports: Pre-fit support model(s). When omitted, the surface is bootstrapped
+            iteratively from high-confidence contact samples.
+        reference_force: Optional normalized force proxy with shape ``(N,)``,
+            ``(N, 1)``, or ``(N, K)``.
 
-    Returns
-    -------
-    ContactDetectionResult
+    Returns:
         Frame mask, per-point scores, fitted support models, and debug metadata.
+
+    Raises:
+        NotImplementedError: If ``config.moving_support_mode`` is True.
+        ValueError: If inputs are malformed or ``t`` is not strictly increasing.
     """
 
     config = config or ContactDetectionConfig()
@@ -631,7 +792,16 @@ def fit_support_model_from_candidates(
     point_mask: ArrayLike,
     config: SupportDetectionConfig,
 ) -> SupportModel:
-    """Fit a support model from marker samples flagged in ``point_mask``."""
+    """Fit a support model from marker samples flagged in ``point_mask``.
+
+    Args:
+        points: Marker positions with shape ``(N, K, 3)``.
+        point_mask: Boolean mask with shape ``(N, K)`` selecting support samples.
+        config: Support-surface fitting parameters.
+
+    Returns:
+        Best support model for the selected samples (with low-point fallback).
+    """
 
     candidate_points = points[np.asarray(point_mask, dtype=bool)]
     if len(candidate_points) < config.min_support_points:
@@ -644,7 +814,19 @@ def fit_support_model_from_candidates(
 
 
 def fit_best_support_surface(points: ArrayLike, config: SupportDetectionConfig) -> SupportModel:
-    """Choose plane vs heightmap support geometry from point coplanarity."""
+    """Choose plane vs heightmap support geometry from point coplanarity.
+
+    Args:
+        points: Support samples with shape ``(M, 3)``.
+        config: Model type and fitting parameters.
+
+    Returns:
+        A :class:`PlaneSupportModel`, :class:`HeightmapSupportModel`, or
+        :class:`LocalPercentileHeightmap` depending on ``config.model_type``.
+
+    Raises:
+        ValueError: If ``model_type`` is unsupported.
+    """
 
     points = _validate_point_cloud(points)
     model_type = normalize_enum(config.model_type, SupportModelType)
@@ -676,7 +858,25 @@ def compute_support_relative_features(
     orientations: ArrayLike | None = None,
     reference_force: ArrayLike | None = None,
 ) -> dict[str, FloatArray]:
-    """Build clearance, speed, quietness, and optional auxiliary contact features."""
+    """Build clearance, speed, quietness, and optional auxiliary contact features.
+
+    Args:
+        points: Marker positions with shape ``(N, K, 3)``.
+        velocities: Marker velocities with shape ``(N, K, 3)``.
+        support_model: Fitted support geometry for clearance and normals.
+        quiet_debug: Per-marker quiet-detection debug dicts from :func:`detect_quiet_intervals`.
+        config: Contact feature scaling and offset settings.
+        t: Required when ``orientations`` is provided.
+        orientations: Optional quaternions with shape ``(N, 4)`` or ``(N, K, 4)``.
+        reference_force: Optional force proxy for score blending.
+
+    Returns:
+        Feature arrays keyed by names such as ``"clearance"``, ``"tangential_speed"``,
+        and ``"quiet_activity"``.
+
+    Raises:
+        ValueError: If ``orientations`` is set but ``t`` is omitted.
+    """
     n_frames, n_points, _ = points.shape
     flat_points = points.reshape(-1, 3)
     flat_velocities = velocities.reshape(-1, 3)
@@ -745,7 +945,15 @@ def score_contact_features(
     features: dict[str, FloatArray],
     config: ContactDetectionConfig,
 ) -> FloatArray:
-    """Map support-relative features to per-marker contact scores in ``[0, 1]``."""
+    """Map support-relative features to per-marker contact scores in ``[0, 1]``.
+
+    Args:
+        features: Output of :func:`compute_support_relative_features`.
+        config: Feature weights and penalty scales.
+
+    Returns:
+        Contact scores with shape ``(N, K)`` in ``[0, 1]``.
+    """
     weights = config.feature_weights
 
     penalty = np.zeros_like(features["abs_clearance"], dtype=float)
@@ -777,7 +985,17 @@ def estimate_contact_offset(
     quantile: float = 0.20,
     max_abs_offset: float = 0.045,
 ) -> float:
-    """Estimate a per-marker clearance bias from quiet, near-contact samples."""
+    """Estimate a per-marker clearance bias from quiet, near-contact samples.
+
+    Args:
+        clearance: Per-frame clearance samples for one marker.
+        quiet_mask: Boolean quiet mask aligned with ``clearance``.
+        quantile: Quantile cutoff selecting low-clearance quiet samples.
+        max_abs_offset: Return ``0.0`` when the median offset exceeds this magnitude.
+
+    Returns:
+        Estimated clearance bias (meters), or ``0.0`` when no quiet samples exist.
+    """
 
     clearance = np.asarray(clearance, dtype=float)
     quiet_mask = np.asarray(quiet_mask, dtype=bool)
@@ -918,7 +1136,18 @@ def _validate_point_cloud(points: ArrayLike) -> FloatArray:
 
 
 def fit_plane_svd(points: ArrayLike, up_axis: int = 2) -> tuple[FloatArray, FloatArray]:
-    """Fit a plane with SVD and return ``(origin, unit_normal)``."""
+    """Fit a plane with SVD and return ``(origin, unit_normal)``.
+
+    Args:
+        points: Point cloud with shape ``(M, 3)``.
+        up_axis: World-axis index used to orient the normal upward.
+
+    Returns:
+        A ``(origin, normal)`` pair where ``normal`` is a unit vector.
+
+    Raises:
+        ValueError: If ``points`` is not ``(M, 3)`` or the normal is degenerate.
+    """
 
     return _fit_plane_svd(_validate_point_cloud(points), up_axis)
 

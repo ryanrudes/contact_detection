@@ -1,11 +1,17 @@
 """Marker-based quiet and contact detection for motion-capture time series.
 
-Public API
-----------
-- :mod:`contact_detection.quiet` — quiet-interval detection
-- :mod:`contact_detection.contact` — support-surface fitting and contact intervals
-- :mod:`contact_detection.foot_support` — per-foot air/ground/skateboard classification
-- :mod:`contact_detection.intervals` — mask/interval utilities
+The package fits support surfaces from quiet marker samples, scores contact
+intervals relative to those surfaces, and classifies each foot separately as
+air, ground, or skateboard. Configuration uses dataclasses and :class:`enum.StrEnum`
+values; see :data:`contact_detection.__all__` for the supported public surface.
+
+Modules:
+    quiet: Scalar, vector, and quaternion quiet-interval detection.
+    contact: Support-surface fitting and marker contact intervals.
+    foot_support: Per-foot air / ground / skateboard classification.
+    intervals: Boolean mask ↔ interval conversion and summaries.
+    enums: Shared string enums and :func:`normalize_enum`.
+    debug: Optional Matplotlib diagnostic plots.
 """
 
 from .contact import (

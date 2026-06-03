@@ -1,3 +1,5 @@
+"""Per-foot air, ground, and skateboard support classification from rigid-body motion."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -53,6 +55,31 @@ class FootSupportConfig:
     Ground support is estimated from low observed foot heights. Skateboard
     support requires horizontal proximity to the board, plausible relative
     vertical offset, and low foot-board relative motion.
+
+    Attributes:
+        foot_names (tuple[str, str]): Rigid-body names for left and right feet.
+        board_name (str): Rigid-body name for the skateboard deck.
+        up_axis (int): World-axis index treated as vertical (0, 1, or 2).
+        floor_model (FloorModel | str): Scalar height or robust plane floor fit.
+        floor_low_percentile (float): Percentile cutoff for low foot heights (height model).
+        floor_plane_candidate_percentile (float): Upper height percentile for plane samples.
+        floor_plane_residual_tolerance (float): Inlier threshold when fitting the floor plane.
+        floor_plane_ransac_iterations (int): RANSAC iterations for plane fitting.
+        floor_plane_random_seed (int): RNG seed for plane RANSAC.
+        ground_clearance_tolerance (float): Max |clearance| for ground contact (meters).
+        ground_speed_tolerance (float): Max foot speed for ground contact (m/s).
+        board_horizontal_tolerance (float): Max horizontal foot-board distance (meters).
+        board_vertical_tolerance (float): Max |relative height - offset| for board contact.
+        board_min_relative_height (float): Lower bound on foot height above board (meters).
+        board_max_relative_height (float): Upper bound on foot height above board (meters).
+        board_relative_speed_tolerance (float): Max |v_foot - v_board| for moving board (m/s).
+        static_board_speed_tolerance (float): Max board speed for static board branch (m/s).
+        static_board_foot_speed_tolerance (float): Max foot speed for static board branch (m/s).
+        default_board_contact_offset (float): Fallback foot-board vertical offset (meters).
+        min_board_offset_samples (int): Min samples to estimate offset from data.
+        velocity_window_time (float): Window for polynomial velocity estimation (seconds).
+        max_gap_time (float): Max gap to fill in state masks (seconds).
+        min_state_time (float): Min duration for a state blip to survive cleaning (seconds).
     """
 
     foot_names: tuple[str, str] = ("Left_Shoe", "Right_Shoe")
@@ -85,7 +112,19 @@ class FootSupportConfig:
 
 @dataclass
 class FootSupportClassification:
-    """Output of per-foot support classification."""
+    """Output of per-foot support classification.
+
+    Attributes:
+        t (FloatArray): Timestamps with shape ``(N,)``.
+        states (dict[str, StateArray]): Per-foot :class:`FootSupportState` arrays.
+        floor_model (FloorModel): Floor geometry used for ground clearance.
+        floor_height (float): Scalar floor height (median reference for plane floors).
+        floor_normal (FloatArray | None): Unit normal when ``floor_model`` is plane.
+        floor_origin (FloatArray | None): Plane origin when ``floor_model`` is plane.
+        board_contact_offsets (dict[str, float]): Estimated foot-board vertical offset per foot.
+        features (dict[str, dict[str, FeatureArray]]): Diagnostic traces per foot name.
+        intervals (dict[str, StateIntervals]): State intervals keyed by foot then state label.
+    """
 
     t: FloatArray
     states: dict[str, StateArray]
@@ -106,23 +145,20 @@ def classify_foot_support_states(
 ) -> FootSupportClassification:
     """Classify each configured foot as air, ground, or skateboard over time.
 
-    Parameters
-    ----------
-    t:
-        Strictly increasing timestamps with shape ``(N,)``. The caller may pass
-        absolute or trial-relative time; intervals use the same origin.
-    body_names:
-        Body names corresponding to axis 1 of ``body_pos``.
-    body_pos:
-        Body positions with shape ``(N, B, 3)``.
-    config:
-        Optional classification thresholds and body-name configuration.
+    Args:
+        t: Strictly increasing timestamps with shape ``(N,)``. May be absolute or
+            trial-relative; intervals use the same origin.
+        body_names: Body names corresponding to axis 1 of ``body_pos``.
+        body_pos: Body positions with shape ``(N, B, 3)``.
+        config: Optional classification thresholds and body-name configuration.
 
-    Returns
-    -------
-    FootSupportClassification
+    Returns:
         State arrays, state intervals, floor model diagnostics, estimated board
         contact offsets, and diagnostic feature arrays per foot.
+
+    Raises:
+        ValueError: If inputs are malformed, ``t`` is not strictly increasing, or a
+            configured body name is missing from ``body_names``.
     """
 
     config = config or FootSupportConfig()
@@ -248,7 +284,15 @@ def classify_foot_support_states(
 
 
 def intervals_by_state(t: ArrayLike, state: ArrayLike) -> StateIntervals:
-    """Convert a per-frame state array into intervals grouped by state label."""
+    """Convert a per-frame state array into intervals grouped by state label.
+
+    Args:
+        t: Timestamps with shape ``(N,)``.
+        state: Per-frame :class:`FootSupportState` values with shape ``(N,)``.
+
+    Returns:
+        Map from state label (``"air"``, ``"ground"``, ``"skateboard"``) to interval lists.
+    """
 
     state = np.asarray(state)
     return {

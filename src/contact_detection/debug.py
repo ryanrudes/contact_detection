@@ -1,3 +1,5 @@
+"""Matplotlib diagnostic plots for quiet, contact, and foot-support detection."""
+
 from __future__ import annotations
 
 from os import PathLike
@@ -15,7 +17,16 @@ def plot_quiet_detection(
     result: QuietDetectionResult,
     title: str | None = None,
 ) -> tuple[Any, Any]:
-    """Plot quiet-detection activity, spread, mask, and detected intervals."""
+    """Plot quiet-detection activity, spread, mask, and detected intervals.
+
+    Args:
+        t: Timestamps with shape ``(N,)``, aligned with ``result``.
+        result: Output of :func:`contact_detection.quiet.detect_quiet_intervals`.
+        title: Optional figure suptitle.
+
+    Returns:
+        A ``(fig, axes)`` pair from Matplotlib.
+    """
 
     import matplotlib.pyplot as plt
 
@@ -47,7 +58,16 @@ def plot_contact_detection(
     result: ContactDetectionResult,
     title: str | None = None,
 ) -> tuple[Any, Any]:
-    """Plot contact scores, support-relative features, and contact intervals."""
+    """Plot contact scores, support-relative features, and contact intervals.
+
+    Args:
+        t: Timestamps with shape ``(N,)``, aligned with ``result``.
+        result: Output of :func:`contact_detection.contact.detect_contact_intervals`.
+        title: Optional figure suptitle.
+
+    Returns:
+        A ``(fig, axes)`` pair from Matplotlib.
+    """
 
     import matplotlib.pyplot as plt
 
@@ -84,7 +104,15 @@ def plot_support_candidates_3d(
     candidates: SupportCandidateSet,
     support_model: SupportModel | None = None,
 ) -> tuple[Any, Any]:
-    """Plot support candidate points in 3D with an optional model title."""
+    """Plot support candidate points in 3D with an optional model title.
+
+    Args:
+        candidates: Quiet-interval support samples to scatter.
+        support_model: Optional fitted surface; its ``name`` is used as the plot title.
+
+    Returns:
+        A ``(fig, ax)`` pair from Matplotlib (3D axes).
+    """
 
     import matplotlib.pyplot as plt
 
@@ -107,7 +135,17 @@ def plot_foot_support_states(
     output_path: str | PathLike[str] | None = None,
     title: str | None = None,
 ) -> tuple[Any, Any]:
-    """Plot per-foot air, ground, and skateboard states shaded through time."""
+    """Plot per-foot air, ground, and skateboard states shaded through time.
+
+    Args:
+        classification: Output of
+            :func:`contact_detection.foot_support.classify_foot_support_states`.
+        output_path: When set, save the figure to this path (PNG at 160 DPI).
+        title: Optional figure suptitle.
+
+    Returns:
+        A ``(fig, axes)`` pair from Matplotlib (one subplot per foot).
+    """
 
     import matplotlib.pyplot as plt
     from matplotlib.patches import Patch

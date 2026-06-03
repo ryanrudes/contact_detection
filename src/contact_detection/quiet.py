@@ -35,7 +35,32 @@ Z_RANGE_OFF_EPS = 0.018        # meters
 
 @dataclass(frozen=True)
 class QuietDetectionConfig:
-    """Smoothing windows, hysteresis thresholds, and signal-type options."""
+    """Smoothing windows, hysteresis thresholds, and signal-type options.
+
+    Attributes:
+        signal_type (QuietSignalType | str): Input layout (scalar, vector, quaternion, …).
+        vector_mode (VectorQuietMode | str): How vector signals reduce to scalar metrics.
+        min_interval_time (float): Minimum quiet interval duration (seconds).
+        max_gap_time (float): Max False gap to fill in the quiet mask (seconds).
+        min_blip_time (float): Min True blip to remove from the quiet mask (seconds).
+        pos_smooth_time (float): Gaussian smoothing sigma for position (seconds).
+        vel_smooth_time (float): Gaussian smoothing sigma for velocity (seconds).
+        quiet_window_time (float): Activity window duration (seconds).
+        spread_window_time (float): Spread window duration (seconds).
+        derivative_window_time (float | None): Local polynomial window; ``None`` uses gradient.
+        derivative_poly_degree (int): Polynomial degree for derivative estimation.
+        activity_on_eps (float | None): Activity on-threshold; ``None`` auto-estimates.
+        activity_off_eps (float | None): Activity off-threshold; ``None`` auto-estimates.
+        spread_on_eps (float | None): Spread on-threshold; ``None`` auto-estimates.
+        spread_off_eps (float | None): Spread off-threshold; ``None`` auto-estimates.
+        min_activity_on_eps (float): Floor for auto activity on-threshold.
+        min_activity_off_eps (float): Floor for auto activity off-threshold.
+        min_spread_on_eps (float): Floor for auto spread on-threshold.
+        min_spread_off_eps (float): Floor for auto spread off-threshold.
+        use_time_gaussian_smoothing (bool): Use time-based Gaussian vs sample-based filter.
+        use_time_windows (bool): Use timestamp windows vs fixed sample-count windows.
+        quaternion_scalar_last (bool): Whether quaternion input is xyzw vs wxyz.
+    """
 
     signal_type: QuietSignalType | str = QuietSignalType.SCALAR
     vector_mode: VectorQuietMode | str = VectorQuietMode.NORM
@@ -67,7 +92,16 @@ class QuietDetectionConfig:
 
 @dataclass
 class QuietDetectionResult:
-    """Output of quiet-interval detection on a single motion channel."""
+    """Output of quiet-interval detection on a single motion channel.
+
+    Attributes:
+        intervals (IntervalList): Contiguous quiet intervals in time.
+        mask (BoolArray): Per-frame quiet mask with shape ``(N,)``.
+        activity (FloatArray): Smoothed activity metric with shape ``(N,)``.
+        spread (FloatArray): Local spread metric with shape ``(N,)``.
+        scores (FloatArray | None): Optional auxiliary scores (unused by default).
+        debug (DebugDict): Smoothed signals, thresholds, and intermediate arrays.
+    """
 
     intervals: IntervalList
     mask: BoolArray
@@ -83,7 +117,20 @@ def near_zero_intervals(
     T: float,
     eps: float,
 ) -> IntervalList:
-    """Find intervals where ``|x| <= eps`` for at least ``T`` seconds."""
+    """Find intervals where ``|x| <= eps`` for at least ``T`` seconds.
+
+    Args:
+        t: Timestamps with shape ``(N,)``.
+        x: Scalar signal with shape ``(N,)``.
+        T: Minimum interval duration (seconds).
+        eps: Near-zero magnitude threshold.
+
+    Returns:
+        Contiguous intervals satisfying the threshold.
+
+    Raises:
+        ValueError: If ``t`` and ``x`` are not 1D or have different lengths.
+    """
     t = np.asarray(t)
     x = np.asarray(x)
 
@@ -118,7 +165,15 @@ def near_zero_intervals(
     return intervals
 
 def shrink_intervals(intervals: IntervalList, shrink_amount: float) -> IntervalList:
-    """Trim each interval inward by ``shrink_amount`` seconds on both ends."""
+    """Trim each interval inward by ``shrink_amount`` seconds on both ends.
+
+    Args:
+        intervals: Input intervals ``(start, end)``.
+        shrink_amount: Seconds removed from both start and end.
+
+    Returns:
+        Trimmed intervals; intervals that collapse are dropped.
+    """
     new_intervals = []
     for start, end in intervals:
         new_start = start + shrink_amount
@@ -133,7 +188,16 @@ def intervals_from_mask(
     mask: ArrayLike,
     min_duration: float = 0.0,
 ) -> IntervalList:
-    """Convert a boolean mask into ``(start, end)`` time intervals."""
+    """Convert a boolean mask into ``(start, end)`` time intervals.
+
+    Args:
+        t: Timestamps with shape ``(N,)``.
+        mask: Boolean mask with shape ``(N,)``.
+        min_duration: Drop intervals shorter than this many seconds.
+
+    Returns:
+        Contiguous True runs expressed in the same time units as ``t``.
+    """
     t = np.asarray(t)
     mask = np.asarray(mask, dtype=bool)
 
@@ -155,7 +219,15 @@ def intervals_from_mask(
 
 
 def odd_window_samples(t: ArrayLike, window_time: float) -> int:
-    """Convert a time window to an odd sample count using the median ``dt``."""
+    """Convert a time window to an odd sample count using the median ``dt``.
+
+    Args:
+        t: Timestamps with shape ``(N,)`` (at least two samples).
+        window_time: Target window duration (seconds).
+
+    Returns:
+        Odd integer sample count of at least 3.
+    """
     dt_med = np.median(np.diff(t))
     samples = max(3, int(round(window_time / dt_med)))
     if samples % 2 == 0:
@@ -164,11 +236,29 @@ def odd_window_samples(t: ArrayLike, window_time: float) -> int:
 
 
 def moving_rms(x: ArrayLike, window_samples: int) -> FloatArray:
+    """Sample-based moving RMS with a uniform window.
+
+    Args:
+        x: Scalar signal.
+        window_samples: Odd window length in samples.
+
+    Returns:
+        RMS values aligned with ``x``.
+    """
     x = np.asarray(x, dtype=float)
     return np.sqrt(uniform_filter1d(x * x, size=window_samples, mode="nearest"))
 
 
 def moving_std(x: ArrayLike, window_samples: int) -> FloatArray:
+    """Sample-based moving standard deviation with a uniform window.
+
+    Args:
+        x: Scalar signal.
+        window_samples: Window length in samples.
+
+    Returns:
+        Standard deviation values aligned with ``x``.
+    """
     x = np.asarray(x, dtype=float)
     mean = uniform_filter1d(x, size=window_samples, mode="nearest")
     mean_sq = uniform_filter1d(x * x, size=window_samples, mode="nearest")
@@ -176,6 +266,15 @@ def moving_std(x: ArrayLike, window_samples: int) -> FloatArray:
 
 
 def moving_range(x: ArrayLike, window_samples: int) -> FloatArray:
+    """Sample-based moving range (max − min) with a uniform window.
+
+    Args:
+        x: Scalar signal.
+        window_samples: Window length in samples.
+
+    Returns:
+        Range values aligned with ``x``.
+    """
     x = np.asarray(x, dtype=float)
     return maximum_filter1d(x, size=window_samples, mode="nearest") - minimum_filter1d(x, size=window_samples, mode="nearest")
 
@@ -208,6 +307,7 @@ def _time_window_slices(t: ArrayLike, window_time: float) -> Iterator[slice]:
 
 
 def time_moving_rms(x: ArrayLike, t: ArrayLike, window_time: float) -> FloatArray:
+    """Time-centered RMS; see :func:`time_window_rms`."""
     x = np.asarray(x, dtype=float)
     if x.ndim != 1:
         raise ValueError("x must be a 1D array.")
@@ -219,6 +319,7 @@ def time_moving_rms(x: ArrayLike, t: ArrayLike, window_time: float) -> FloatArra
 
 
 def time_moving_std(x: ArrayLike, t: ArrayLike, window_time: float) -> FloatArray:
+    """Time-centered standard deviation; see :func:`time_window_std`."""
     x = np.asarray(x, dtype=float)
     if x.ndim != 1:
         raise ValueError("x must be a 1D array.")
@@ -229,6 +330,7 @@ def time_moving_std(x: ArrayLike, t: ArrayLike, window_time: float) -> FloatArra
 
 
 def time_moving_range(x: ArrayLike, t: ArrayLike, window_time: float) -> FloatArray:
+    """Time-centered range; see :func:`time_window_range`."""
     x = np.asarray(x, dtype=float)
     if x.ndim != 1:
         raise ValueError("x must be a 1D array.")
@@ -240,25 +342,71 @@ def time_moving_range(x: ArrayLike, t: ArrayLike, window_time: float) -> FloatAr
 
 
 def time_window_rms(x: ArrayLike, t: ArrayLike, window_time: float) -> FloatArray:
-    """Alias for :func:`time_moving_rms` using actual timestamps."""
+    """Compute a time-centered RMS using actual timestamps.
+
+    Args:
+        x: Scalar signal with shape ``(N,)``.
+        t: Strictly increasing timestamps with shape ``(N,)``.
+        window_time: Full width of each averaging window (seconds).
+
+    Returns:
+        RMS values with shape ``(N,)``.
+
+    Raises:
+        ValueError: If ``x`` is not 1D.
+    """
 
     return time_moving_rms(x, t, window_time)
 
 
 def time_window_std(x: ArrayLike, t: ArrayLike, window_time: float) -> FloatArray:
-    """Alias for :func:`time_moving_std` using actual timestamps."""
+    """Compute a time-centered standard deviation using actual timestamps.
+
+    Args:
+        x: Scalar signal with shape ``(N,)``.
+        t: Strictly increasing timestamps with shape ``(N,)``.
+        window_time: Full width of each averaging window (seconds).
+
+    Returns:
+        Standard deviation values with shape ``(N,)``.
+
+    Raises:
+        ValueError: If ``x`` is not 1D.
+    """
 
     return time_moving_std(x, t, window_time)
 
 
 def time_window_range(x: ArrayLike, t: ArrayLike, window_time: float) -> FloatArray:
-    """Alias for :func:`time_moving_range` using actual timestamps."""
+    """Compute a time-centered range (max − min) using actual timestamps.
+
+    Args:
+        x: Scalar signal with shape ``(N,)``.
+        t: Strictly increasing timestamps with shape ``(N,)``.
+        window_time: Full width of each averaging window (seconds).
+
+    Returns:
+        Range values with shape ``(N,)``.
+
+    Raises:
+        ValueError: If ``x`` is not 1D.
+    """
 
     return time_moving_range(x, t, window_time)
 
 
 def ensure_2d_signal(X: ArrayLike) -> tuple[FloatArray, bool]:
-    """Promote 1D inputs to ``(N, 1)`` and report whether the input was scalar."""
+    """Promote 1D inputs to ``(N, 1)`` and report whether the input was scalar.
+
+    Args:
+        X: Signal with shape ``(N,)`` or ``(N, D)``.
+
+    Returns:
+        A ``(X_2d, was_scalar)`` pair.
+
+    Raises:
+        ValueError: If ``X`` is not 1D or 2D.
+    """
     X = np.asarray(X, dtype=float)
     scalar_input = X.ndim == 1
 
@@ -277,7 +425,20 @@ def time_gaussian_smooth(
     sigma_time: float,
     radius_sigma: float = 3.0,
 ) -> FloatArray:
-    """Smooth a scalar or vector signal using a Gaussian kernel in actual time."""
+    """Smooth a scalar or vector signal using a Gaussian kernel in actual time.
+
+    Args:
+        X: Samples with shape ``(N,)`` or ``(N, D)``.
+        t: Strictly increasing timestamps with shape ``(N,)``.
+        sigma_time: Gaussian standard deviation in seconds.
+        radius_sigma: Truncate the kernel at ``radius_sigma * sigma_time``.
+
+    Returns:
+        Smoothed signal with the same shape as the input.
+
+    Raises:
+        ValueError: If shapes disagree or ``t`` is not strictly increasing.
+    """
     X_2d, scalar_input = ensure_2d_signal(X)
     t = np.asarray(t, dtype=float)
 
@@ -330,7 +491,17 @@ def smooth_signal_for_quiet_detector(
     smooth_time: float,
     use_time_gaussian_smoothing: bool = True,
 ) -> FloatArray:
-    """Apply the configured smoothing stage before quiet feature extraction."""
+    """Apply the configured smoothing stage before quiet feature extraction.
+
+    Args:
+        X: Samples with shape ``(N,)`` or ``(N, D)``.
+        t: Timestamps with shape ``(N,)``.
+        smooth_time: Gaussian sigma in seconds.
+        use_time_gaussian_smoothing: Use :func:`time_gaussian_smooth` vs sample Gaussian.
+
+    Returns:
+        Smoothed signal with the same shape as the input.
+    """
     X_2d, scalar_input = ensure_2d_signal(X)
     t = np.asarray(t, dtype=float)
 
@@ -355,6 +526,19 @@ def local_polynomial_derivative(
     The polynomial is fit in centered time coordinates, so the coefficient of
     the first-order term is the derivative at the center sample. This is more
     stable than finite differences for irregular timestamps.
+
+    Args:
+        X: Samples with shape ``(N,)`` or ``(N, D)``.
+        t: Strictly increasing timestamps with shape ``(N,)``.
+        window_time: Half-width of the fit window; ``None`` or non-positive uses
+            :func:`numpy.gradient`.
+        degree: Polynomial degree (must be at least 1).
+
+    Returns:
+        Derivative estimate with the same shape as the input.
+
+    Raises:
+        ValueError: If inputs are invalid or ``degree`` is too small.
     """
     X_2d, scalar_input = ensure_2d_signal(X)
     t = np.asarray(t, dtype=float)
@@ -419,6 +603,19 @@ def moving_component_range(
     window_samples: int,
     mode: VectorQuietMode | str = VectorQuietMode.NORM,
 ) -> FloatArray:
+    """Sample-based component range for vector signals.
+
+    Args:
+        X: Samples with shape ``(N,)`` or ``(N, D)``.
+        window_samples: Window length in samples.
+        mode: How per-component ranges combine.
+
+    Returns:
+        Spread metric with shape ``(N,)``.
+
+    Raises:
+        ValueError: If ``mode`` is unsupported.
+    """
     mode = normalize_enum(mode, VectorQuietMode)
     X_2d, scalar_input = ensure_2d_signal(X)
 
@@ -447,6 +644,7 @@ def time_moving_component_range(
     window_time: float,
     mode: VectorQuietMode | str = VectorQuietMode.NORM,
 ) -> FloatArray:
+    """Time-centered component range; see :func:`time_window_component_range`."""
     mode = normalize_enum(mode, VectorQuietMode)
     X_2d, scalar_input = ensure_2d_signal(X)
 
@@ -475,13 +673,33 @@ def time_window_component_range(
     window_time: float,
     mode: VectorQuietMode | str = VectorQuietMode.NORM,
 ) -> FloatArray:
-    """Alias for :func:`time_moving_component_range` using actual timestamps."""
+    """Compute a time-centered component range for vector signals.
+
+    Args:
+        X: Samples with shape ``(N,)`` or ``(N, D)``.
+        t: Timestamps with shape ``(N,)``.
+        window_time: Full width of each averaging window (seconds).
+        mode: How per-component ranges combine (norm, max component, …).
+
+    Returns:
+        Spread metric with shape ``(N,)``.
+
+    Raises:
+        ValueError: If ``mode`` is unsupported.
+    """
 
     return time_moving_component_range(X, t, window_time, mode=mode)
 
 
 def robust_component_scales(X: ArrayLike) -> FloatArray:
-    """Robust per-component scale estimates using MAD with std fallback."""
+    """Robust per-component scale estimates using MAD with std fallback.
+
+    Args:
+        X: Samples with shape ``(N,)`` or ``(N, D)``.
+
+    Returns:
+        Positive scale per channel with shape ``(D,)``.
+    """
     X_2d, _ = ensure_2d_signal(X)
     med = np.median(X_2d, axis=0)
     mad = np.median(np.abs(X_2d - med[None, :]), axis=0)
@@ -493,7 +711,14 @@ def robust_component_scales(X: ArrayLike) -> FloatArray:
 
 
 def robust_mahalanobis_energy(X: ArrayLike) -> FloatArray:
-    """Per-sample Mahalanobis distance using robust centering and scaling."""
+    """Per-sample Mahalanobis distance using robust centering and scaling.
+
+    Args:
+        X: Samples with shape ``(N,)`` or ``(N, D)``.
+
+    Returns:
+        Distance values with shape ``(N,)``.
+    """
     X_2d, scalar_input = ensure_2d_signal(X)
     if scalar_input:
         scale = robust_scale(X_2d[:, 0])
@@ -514,7 +739,14 @@ def robust_mahalanobis_energy(X: ArrayLike) -> FloatArray:
 
 
 def robust_scale(x: ArrayLike) -> float:
-    """MAD-based robust scale for a 1D signal."""
+    """MAD-based robust scale for a 1D signal.
+
+    Args:
+        x: Scalar samples.
+
+    Returns:
+        Robust scale estimate (may be zero for constant signals).
+    """
     x = np.asarray(x, dtype=float)
     med = np.median(x)
     mad = np.median(np.abs(x - med))
@@ -525,7 +757,18 @@ def quaternion_standardize_xyzw(
     quat: ArrayLike,
     scalar_last: bool = True,
 ) -> FloatArray:
-    """Normalize quaternions to xyzw layout and enforce hemisphere continuity."""
+    """Normalize quaternions to xyzw layout and enforce hemisphere continuity.
+
+    Args:
+        quat: Quaternion time series with shape ``(N, 4)``.
+        scalar_last: When True, input is xyzw; when False, input is wxyz.
+
+    Returns:
+        Unit quaternions in xyzw layout with shape ``(N, 4)``.
+
+    Raises:
+        ValueError: If shape is wrong or any quaternion has zero norm.
+    """
     quat = np.asarray(quat, dtype=float)
 
     if quat.ndim != 2 or quat.shape[1] != 4:
@@ -549,7 +792,18 @@ def quaternion_standardize_xyzw(
 
 
 def quaternion_angular_speed(q_xyzw: ArrayLike, t: ArrayLike) -> FloatArray:
-    """Estimate angular speed (rad/s) from a unit quaternion time series."""
+    """Estimate angular speed (rad/s) from a unit quaternion time series.
+
+    Args:
+        q_xyzw: Unit quaternions in xyzw layout with shape ``(N, 4)``.
+        t: Timestamps with shape ``(N,)``.
+
+    Returns:
+        Angular speed with shape ``(N,)``.
+
+    Raises:
+        ValueError: If ``q_xyzw`` and ``t`` have different lengths.
+    """
     q_xyzw = quaternion_standardize_xyzw(q_xyzw, scalar_last=True)
     t = np.asarray(t, dtype=float)
 
@@ -580,7 +834,20 @@ def quaternion_local_spread(
     window_time: float,
     use_rms: bool = True,
 ) -> FloatArray:
-    """Local orientation spread around each timestamp in radians."""
+    """Local orientation spread around each timestamp in radians.
+
+    Args:
+        q_xyzw: Unit quaternions in xyzw layout with shape ``(N, 4)``.
+        t: Timestamps with shape ``(N,)``.
+        window_time: Full width of each neighborhood window (seconds).
+        use_rms: When True, use RMS of relative angles; otherwise use the max angle.
+
+    Returns:
+        Spread values with shape ``(N,)``.
+
+    Raises:
+        ValueError: If ``q_xyzw`` and ``t`` have different lengths.
+    """
     q_xyzw = quaternion_standardize_xyzw(q_xyzw, scalar_last=True)
     t = np.asarray(t, dtype=float)
 
@@ -625,6 +892,12 @@ def adaptive_hysteresis_thresholds(activity: ArrayLike) -> tuple[float, float]:
     Percentile thresholds are more stable than MAD when most of the recording is
     quiet: the lower/middle part of the distribution is treated as likely quiet
     contact, while large bursts are treated as swing/lift/impact.
+
+    Args:
+        activity: Per-frame activity metric.
+
+    Returns:
+        A ``(on_eps, off_eps)`` pair with ``off_eps >= on_eps``.
     """
     activity = np.asarray(activity, dtype=float)
     finite = activity[np.isfinite(activity)]
@@ -642,7 +915,16 @@ def adaptive_hysteresis_thresholds(activity: ArrayLike) -> tuple[float, float]:
 
 
 def hysteresis_mask(activity: ArrayLike, on_eps: float, off_eps: float) -> BoolArray:
-    """Low-activity hysteresis mask (True when activity is below thresholds)."""
+    """Low-activity hysteresis mask (True when activity is below thresholds).
+
+    Args:
+        activity: Per-frame activity metric.
+        on_eps: Enter quiet when activity falls to or below this value.
+        off_eps: Leave quiet when activity rises to or above this value.
+
+    Returns:
+        Boolean mask with shape ``(N,)``.
+    """
     mask = np.zeros_like(activity, dtype=bool)
     in_contact = False
 
@@ -663,7 +945,16 @@ def score_hysteresis_mask(
     on_threshold: float,
     off_threshold: float,
 ) -> BoolArray:
-    """High-score hysteresis mask (True when score stays above thresholds)."""
+    """High-score hysteresis mask (True when score stays above thresholds).
+
+    Args:
+        score: Per-frame score with shape ``(N,)``.
+        on_threshold: Score must reach this to enter the active state.
+        off_threshold: Score must fall to or below this to leave the active state.
+
+    Returns:
+        Boolean mask with shape ``(N,)``.
+    """
     score = np.asarray(score, dtype=float)
     mask = np.zeros_like(score, dtype=bool)
     in_contact = False
@@ -706,6 +997,7 @@ def _run_durations(
 
 
 def fill_short_false_runs(t: ArrayLike, mask: ArrayLike, max_gap_time: float) -> BoolArray:
+    """Fill interior False runs shorter than ``max_gap_time``; see :mod:`contact_detection.intervals`."""
     cleaned = np.asarray(mask, dtype=bool).copy()
     if max_gap_time <= 0.0:
         return cleaned
@@ -717,6 +1009,7 @@ def fill_short_false_runs(t: ArrayLike, mask: ArrayLike, max_gap_time: float) ->
 
 
 def remove_short_true_runs(t: ArrayLike, mask: ArrayLike, min_duration: float) -> BoolArray:
+    """Remove True runs shorter than ``min_duration``; see :mod:`contact_detection.intervals`."""
     cleaned = np.asarray(mask, dtype=bool).copy()
     if min_duration <= 0.0:
         return cleaned
@@ -732,7 +1025,17 @@ def clean_mask_by_time(
     max_gap_time: float = MAX_GAP_TIME,
     min_blip_time: float = MIN_BLIP_TIME,
 ) -> BoolArray:
-    """Fill short gaps then remove short quiet blips."""
+    """Fill short gaps then remove short quiet blips.
+
+    Args:
+        t: Timestamps with shape ``(N,)``.
+        mask: Boolean quiet mask with shape ``(N,)``.
+        max_gap_time: Maximum False-run duration to fill (seconds).
+        min_blip_time: Minimum True-run duration to keep (seconds).
+
+    Returns:
+        Temporally cleaned boolean mask with shape ``(N,)``.
+    """
     cleaned = fill_short_false_runs(t, mask, max_gap_time)
     cleaned = remove_short_true_runs(t, cleaned, min_blip_time)
     return cleaned
@@ -746,7 +1049,19 @@ def dual_hysteresis_mask(
     z_range_on: float,
     z_range_off: float,
 ) -> BoolArray:
-    """Hysteresis using both activity and local position spread."""
+    """Hysteresis using both activity and local position spread.
+
+    Args:
+        activity: Per-frame activity metric.
+        activity_on: Activity threshold to enter quiet.
+        activity_off: Activity threshold to leave quiet.
+        z_range: Per-frame spread metric.
+        z_range_on: Spread threshold to enter quiet.
+        z_range_off: Spread threshold to leave quiet.
+
+    Returns:
+        Boolean mask with shape ``(N,)`` (True when both metrics indicate quiet).
+    """
     mask = np.zeros_like(activity, dtype=bool)
     in_contact = False
 
@@ -770,7 +1085,18 @@ def adaptive_range_thresholds(
     on_percentile: float = 45.0,
     off_percentile: float = 65.0,
 ) -> tuple[float, float]:
-    """Estimate spread on/off thresholds from the spread distribution."""
+    """Estimate spread on/off thresholds from the spread distribution.
+
+    Args:
+        spread: Per-frame spread metric.
+        min_on: Floor for the on-threshold.
+        min_off: Floor for the off-threshold.
+        on_percentile: Percentile used for the on-threshold.
+        off_percentile: Percentile used for the off-threshold.
+
+    Returns:
+        A ``(on_eps, off_eps)`` pair with ``off_eps >= on_eps``.
+    """
     spread = np.asarray(spread, dtype=float)
     finite = spread[np.isfinite(spread)]
 
@@ -799,7 +1125,29 @@ def compute_quiet_activity_and_spread(
     use_time_windows: bool = True,
     quaternion_scalar_last: bool = True,
 ) -> tuple[FloatArray, FloatArray, DebugDict]:
-    """Compute smoothed activity and spread features used for quiet detection."""
+    """Compute smoothed activity and spread features used for quiet detection.
+
+    Args:
+        t_raw: Strictly increasing timestamps with shape ``(N,)``.
+        X_raw: Motion samples; shape depends on ``signal_type``.
+        signal_type: Input layout (scalar, vector, quaternion, …).
+        vector_mode: How vector signals reduce to scalar metrics.
+        pos_smooth_time: Position smoothing sigma (seconds).
+        vel_smooth_time: Velocity smoothing sigma (seconds).
+        quiet_window_time: Activity window duration (seconds).
+        spread_window_time: Spread window duration (seconds).
+        derivative_window_time: Local polynomial window for derivatives.
+        derivative_poly_degree: Polynomial degree for derivatives.
+        use_time_gaussian_smoothing: Use time-based Gaussian smoothing.
+        use_time_windows: Use timestamp-centered windows.
+        quaternion_scalar_last: Whether quaternion input is xyzw vs wxyz.
+
+    Returns:
+        A ``(activity, spread, debug)`` tuple of per-frame metrics and diagnostics.
+
+    Raises:
+        ValueError: If inputs are malformed or ``signal_type`` / ``vector_mode`` is unsupported.
+    """
     signal_type = normalize_enum(signal_type, QuietSignalType)
     vector_mode = normalize_enum(vector_mode, VectorQuietMode)
     t_raw = np.asarray(t_raw, dtype=float)
@@ -985,7 +1333,42 @@ def detect_quiet_intervals(
     derivative_poly_degree: int = 1,
     config: QuietDetectionConfig | None = None,
 ) -> QuietDetectionResult:
-    """Detect intervals where motion is locally quiet in activity and spread."""
+    """Detect intervals where motion is locally quiet in activity and spread.
+
+    Args:
+        t_raw: Strictly increasing timestamps with shape ``(N,)``.
+        X_raw: Motion samples; shape depends on ``signal_type`` or ``config``.
+        signal_type: Input layout when ``config`` is omitted.
+        vector_mode: Vector reduction mode when ``config`` is omitted.
+        min_interval_time: Minimum quiet interval duration (seconds).
+        max_gap_time: Max gap to fill in the quiet mask (seconds).
+        min_blip_time: Min blip to remove from the quiet mask (seconds).
+        pos_smooth_time: Position smoothing sigma (seconds).
+        vel_smooth_time: Velocity smoothing sigma (seconds).
+        quiet_window_time: Activity window duration (seconds).
+        spread_window_time: Spread window duration (seconds).
+        activity_on_eps: Activity on-threshold; ``None`` auto-estimates.
+        activity_off_eps: Activity off-threshold; ``None`` auto-estimates.
+        spread_on_eps: Spread on-threshold; ``None`` auto-estimates.
+        spread_off_eps: Spread off-threshold; ``None`` auto-estimates.
+        min_activity_on_eps: Floor for auto activity on-threshold.
+        min_activity_off_eps: Floor for auto activity off-threshold.
+        min_spread_on_eps: Floor for auto spread on-threshold.
+        min_spread_off_eps: Floor for auto spread off-threshold.
+        use_time_gaussian_smoothing: Use time-based Gaussian smoothing.
+        quaternion_scalar_last: Whether quaternion input is xyzw vs wxyz.
+        use_time_windows: Use timestamp-centered windows.
+        derivative_window_time: Local polynomial window for derivatives.
+        derivative_poly_degree: Polynomial degree for derivatives.
+        config: Optional bundled settings; overrides the keyword arguments above.
+
+    Returns:
+        Quiet intervals, mask, activity/spread traces, and a debug dictionary.
+
+    Raises:
+        TypeError: If ``config`` is not a :class:`QuietDetectionConfig`.
+        ValueError: If feature extraction fails inside :func:`compute_quiet_activity_and_spread`.
+    """
     t_raw = np.asarray(t_raw, dtype=float)
 
     if config is not None:
@@ -1094,7 +1477,12 @@ def detect_quiet_intervals(
 
 
 def print_z_quiet_debug_summary(debug: DebugDict) -> None:
-    """Print percentile summaries for z-quiet debug dictionaries."""
+    """Print percentile summaries for z-quiet debug dictionaries.
+
+    Args:
+        debug: Debug dict from the ``__main__`` CLI with ``activity``, ``z_range``,
+            and threshold keys.
+    """
     activity = debug["activity"]
     z_range = debug["z_range"]
 
@@ -1118,7 +1506,14 @@ def plot_z_quiet_debug(
     debug: DebugDict,
     title: str | None = None,
 ) -> None:
-    """Plot z-quiet debug traces and shaded detected intervals."""
+    """Plot z-quiet debug traces and shaded detected intervals.
+
+    Args:
+        t_raw: Timestamps with shape ``(N,)``.
+        intervals: Quiet intervals to shade.
+        debug: Debug dict with smoothed vz, activity, spread, and thresholds.
+        title: Optional figure suptitle.
+    """
     import matplotlib.pyplot as plt
 
     vz_smooth = debug["vz_smooth"]
@@ -1173,7 +1568,16 @@ def load_demo_foot_z(
     foot_name: str = "Right_Shoe",
     up_axis: int = 2,
 ) -> tuple[FloatArray, FloatArray, np.lib.npyio.NpzFile]:
-    """Load vertical position for a named foot from a unified NPZ demo file."""
+    """Load vertical position for a named foot from a unified NPZ demo file.
+
+    Args:
+        filepath: Path to a motion-sync style ``synced.npz`` file.
+        foot_name: ``vicon__body_names`` entry to load.
+        up_axis: World-axis index for vertical position.
+
+    Returns:
+        A ``(t, z, npz_file)`` tuple; the NPZ handle is returned for further inspection.
+    """
     demo = np.load(filepath, allow_pickle=True)
     body_names = demo["vicon__body_names"].tolist()
     body_pos = demo["vicon__body_pos"]

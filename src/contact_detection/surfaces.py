@@ -1,4 +1,8 @@
-"""Convenience re-exports for support-surface model types and fitters."""
+"""Convenience re-exports for support-surface model types and fitters.
+
+This module mirrors the support-surface API from :mod:`contact_detection.contact`
+for callers that only need geometry fitting without the full contact pipeline.
+"""
 
 from .contact import (
     HeightmapSupportModel,
