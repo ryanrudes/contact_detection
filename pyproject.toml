@@ -3,7 +3,7 @@ name = "contact-detection"
 version = "0.1.0"
 description = "NumPy-first utilities for quiet interval and contact detection from motion time series."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "numpy",
     "pyyaml>=6.0.3",
