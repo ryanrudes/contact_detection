@@ -43,7 +43,6 @@ from .foot_support import (
     FootSupportState,
     classify_foot_support_states,
     intervals_by_state,
-    load_unified_npz,
 )
 from .quiet import (
     QuietDetectionConfig,
@@ -100,7 +99,6 @@ __all__ = [
     "intervals_from_mask",
     "intervals_by_state",
     "local_polynomial_derivative",
-    "load_unified_npz",
     "mask_from_intervals",
     "normalize_enum",
     "quaternion_angular_speed",

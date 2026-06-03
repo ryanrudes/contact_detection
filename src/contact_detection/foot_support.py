@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
-from os import PathLike
 from typing import Sequence, TypeAlias
 
 import numpy as np
@@ -254,40 +253,6 @@ def intervals_by_state(t: ArrayLike, state: ArrayLike) -> StateIntervals:
         )
         for support_state in FootSupportState
     }
-
-
-def load_unified_npz(
-    path: str | PathLike[str],
-) -> tuple[FloatArray, list[str], FloatArray, np.lib.npyio.NpzFile]:
-    """Load Vicon rigid-body data from a unified NPZ file.
-
-    Expected keys are ``t``, ``vicon__body_names``, and ``vicon__body_pos``.
-    If a ``valid`` mask is present, invalid frames are removed before returning.
-    Returned timestamps are shifted so the first valid frame is time zero.
-    """
-
-    data = np.load(path, allow_pickle=True)
-    required = {"t", "vicon__body_names", "vicon__body_pos"}
-    missing = required - set(data.keys())
-    if missing:
-        raise ValueError(f"Missing required unified.npz keys: {sorted(missing)}")
-
-    t = data["t"].astype(float)
-    body_pos = data["vicon__body_pos"].astype(float)
-    body_names = data["vicon__body_names"].tolist()
-
-    if "valid" in data:
-        valid = np.asarray(data["valid"], dtype=bool)
-        if valid.shape != t.shape:
-            raise ValueError("unified.npz valid mask must have shape (N,).")
-        t = t[valid]
-        body_pos = body_pos[valid]
-
-    if len(t) == 0:
-        raise ValueError("unified.npz contains no valid frames.")
-
-    t = t - float(t[0])
-    return t, body_names, body_pos, data
 
 
 @dataclass(frozen=True)
