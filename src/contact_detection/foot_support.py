@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Sequence, TypeAlias
+from typing import Any, Sequence, TypeAlias
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
+from scipy.spatial.transform import Rotation
 
 from .contact import PlaneSupportModel, SupportDetectionConfig
 from .enums import FloorModel, SupportModelType, normalize_enum
+from .geometry import (
+    BodyContactSurface,
+    ContactSurfaceSet,
+    apply_contact_surface_set,
+    marker_names_for_flat_trajectory,
+)
 from .intervals import clean_mask_by_time, intervals_from_mask
 from .quiet import local_polynomial_derivative
 from .types import BoolArray, FloatArray, IntervalList
@@ -51,21 +59,23 @@ STATE_COLORS: dict[FootSupportState, str] = {
 class FootSupportConfig:
     """Thresholds and body names used for per-foot support classification.
 
-    The classifier treats ground and board contact as separate support classes.
-    Ground support is estimated from low observed foot heights. Skateboard
-    support requires horizontal proximity to the board, plausible relative
-    vertical offset, and low foot-board relative motion.
+    Floor geometry uses :attr:`FloorModel.PLANE` fit from sole-surface samples on
+    provisional then refined **ground-contact** frames (requires
+    :attr:`contact_surface_set` marker patches, ``floor_fit_marker_pos``, and
+    ``body_rotations`` for sole-based trials).
 
     Attributes:
         foot_names (tuple[str, str]): Rigid-body names for left and right feet.
         board_name (str): Rigid-body name for the skateboard deck.
         up_axis (int): World-axis index treated as vertical (0, 1, or 2).
-        floor_model (FloorModel | str): Scalar height or robust plane floor fit.
-        floor_low_percentile (float): Percentile cutoff for low foot heights (height model).
-        floor_plane_candidate_percentile (float): Upper height percentile for plane samples.
+        floor_model (FloorModel | str): Must be ``plane`` (scalar height model removed).
+        provisional_ground_percentile (float): Percentile on sole/body height used to seed ground intervals.
+        provisional_ground_height_slack (float): Extra vertical slack (m) when seeding ground intervals.
+        floor_fit_refinement_passes (int): Refit plane after updating ground-contact masks (>= 1).
         floor_plane_residual_tolerance (float): Inlier threshold when fitting the floor plane.
         floor_plane_ransac_iterations (int): RANSAC iterations for plane fitting.
         floor_plane_random_seed (int): RNG seed for plane RANSAC.
+        min_floor_fit_samples (int): Minimum finite samples required to fit a plane.
         ground_clearance_tolerance (float): Max |clearance| for ground contact (meters).
         ground_speed_tolerance (float): Max foot speed for ground contact (m/s).
         board_horizontal_tolerance (float): Max horizontal foot-board distance (meters).
@@ -80,17 +90,21 @@ class FootSupportConfig:
         velocity_window_time (float): Window for polynomial velocity estimation (seconds).
         max_gap_time (float): Max gap to fill in state masks (seconds).
         min_state_time (float): Min duration for a state blip to survive cleaning (seconds).
+        contact_surface_set (ContactSurfaceSet | None): Sole marker patches and compiled surfaces.
+        floor_fit_marker_names (tuple[str, ...] | None): Marker names for sole samples / floor fit.
     """
 
     foot_names: tuple[str, str] = ("Left_Shoe", "Right_Shoe")
     board_name: str = "Skateboard"
     up_axis: int = 2
-    floor_model: FloorModel | str = FloorModel.HEIGHT
-    floor_low_percentile: float = 15.0
-    floor_plane_candidate_percentile: float = 50.0
+    floor_model: FloorModel | str = FloorModel.PLANE
+    provisional_ground_percentile: float = 25.0
+    provisional_ground_height_slack: float = 0.02
+    floor_fit_refinement_passes: int = 2
     floor_plane_residual_tolerance: float = 0.025
     floor_plane_ransac_iterations: int = 128
     floor_plane_random_seed: int = 17
+    min_floor_fit_samples: int = 12
     ground_clearance_tolerance: float = 0.025
     ground_speed_tolerance: float = 0.18
     board_horizontal_tolerance: float = 0.35
@@ -105,9 +119,22 @@ class FootSupportConfig:
     velocity_window_time: float = 0.08
     max_gap_time: float = 0.10
     min_state_time: float = 0.12
+    contact_surface_set: ContactSurfaceSet | None = None
+    floor_fit_marker_names: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "floor_model", normalize_enum(self.floor_model, FloorModel))
+        floor_model = normalize_enum(self.floor_model, FloorModel)
+        if floor_model != FloorModel.PLANE:
+            raise ValueError(
+                f"floor_model must be {FloorModel.PLANE.value!r}; "
+                f"scalar {FloorModel.HEIGHT.value!r} fitting was removed."
+            )
+        object.__setattr__(self, "floor_model", floor_model)
+        if self.floor_fit_refinement_passes < 1:
+            raise ValueError("floor_fit_refinement_passes must be >= 1.")
+        surface_set = self.contact_surface_set
+        if surface_set is not None and self.floor_fit_marker_names is None:
+            object.__setattr__(self, "floor_fit_marker_names", surface_set.marker_names)
 
 
 @dataclass
@@ -142,23 +169,31 @@ def classify_foot_support_states(
     body_names: Sequence[str],
     body_pos: ArrayLike,
     config: FootSupportConfig | None = None,
+    *,
+    floor_fit_marker_pos: ArrayLike | None = None,
+    floor_fit_marker_names: Sequence[str] | None = None,
+    body_rotations: Mapping[str, FloatArray] | None = None,
 ) -> FootSupportClassification:
     """Classify each configured foot as air, ground, or skateboard over time.
 
+    The floor plane is fit from sole-surface samples (marker patches with body-local
+    offsets) on **ground-contact** frames, refined iteratively, then used with sole
+    contact-frame clearance for the final ground mask.
+
     Args:
-        t: Strictly increasing timestamps with shape ``(N,)``. May be absolute or
-            trial-relative; intervals use the same origin.
+        t: Strictly increasing timestamps with shape ``(N,)``.
         body_names: Body names corresponding to axis 1 of ``body_pos``.
         body_pos: Body positions with shape ``(N, B, 3)``.
-        config: Optional classification thresholds and body-name configuration.
+        config: Classification thresholds and body-name configuration.
+        floor_fit_marker_pos: Marker positions with shape ``(N, M, 3)`` for sole patches.
+        floor_fit_marker_names: Names for axis 1 of ``floor_fit_marker_pos``.
+        body_rotations: Per-body quaternions ``(N, 4)`` for sole offsets and clearance.
 
     Returns:
-        State arrays, state intervals, floor model diagnostics, estimated board
-        contact offsets, and diagnostic feature arrays per foot.
+        State arrays, intervals, floor diagnostics, board offsets, and per-foot features.
 
     Raises:
-        ValueError: If inputs are malformed, ``t`` is not strictly increasing, or a
-            configured body name is missing from ``body_names``.
+        ValueError: If inputs are malformed or required sole/marker data is missing.
     """
 
     config = config or FootSupportConfig()
@@ -181,9 +216,14 @@ def classify_foot_support_states(
     board_idx = _body_index(body_names, config.board_name)
     horizontal_axes = [axis for axis in range(3) if axis != config.up_axis]
 
-    foot_points = body_pos[:, foot_indices, :].reshape(-1, 3)
-    floor_surface = _fit_floor_surface(foot_points, config)
-
+    sole_surfaces = _compile_sole_surfaces(
+        config,
+        body_names=body_names,
+        body_pos=body_pos,
+        floor_fit_marker_pos=floor_fit_marker_pos,
+        floor_fit_marker_names=floor_fit_marker_names,
+        body_rotations=body_rotations,
+    )
     velocities = local_polynomial_derivative(
         body_pos.reshape(len(t), -1),
         t,
@@ -195,11 +235,7 @@ def classify_foot_support_states(
     board_vel = velocities[:, board_idx, :]
     board_speed = np.linalg.norm(board_vel, axis=1)
 
-    states: dict[str, StateArray] = {}
-    board_contact_offsets: dict[str, float] = {}
-    features: dict[str, dict[str, FeatureArray]] = {}
-    all_intervals: dict[str, StateIntervals] = {}
-
+    per_foot: dict[str, dict[str, Any]] = {}
     for foot_name, foot_idx in zip(config.foot_names, foot_indices):
         foot_pos = body_pos[:, foot_idx, :]
         foot_vel = velocities[:, foot_idx, :]
@@ -209,37 +245,108 @@ def classify_foot_support_states(
         relative_speed = np.linalg.norm(relative_vel, axis=1)
         horizontal_distance = np.linalg.norm(relative_pos[:, horizontal_axes], axis=1)
         relative_height = relative_pos[:, config.up_axis]
-        floor_height_at_foot = floor_surface.height_at(foot_pos)
-        ground_clearance = floor_surface.clearance(foot_pos)
+        clearance_point = _clearance_points(
+            foot_pos,
+            foot_name=foot_name,
+            sole_surfaces=sole_surfaces,
+            body_rotations=body_rotations,
+        )
+        per_foot[foot_name] = {
+            "foot_pos": foot_pos,
+            "foot_speed": foot_speed,
+            "horizontal_distance": horizontal_distance,
+            "relative_height": relative_height,
+            "relative_speed": relative_speed,
+            "clearance_point": clearance_point,
+        }
 
+    board_masks: dict[str, BoolArray] = {}
+    board_contact_offsets: dict[str, float] = {}
+    for foot_name, data in per_foot.items():
         board_offset = _estimate_board_contact_offset(
-            horizontal_distance,
-            relative_height,
-            relative_speed,
+            data["horizontal_distance"],
+            data["relative_height"],
+            data["relative_speed"],
             config,
         )
         board_contact_offsets[foot_name] = board_offset
-
         board_geometry = (
-            (horizontal_distance <= config.board_horizontal_tolerance)
-            & (np.abs(relative_height - board_offset) <= config.board_vertical_tolerance)
+            (data["horizontal_distance"] <= config.board_horizontal_tolerance)
+            & (np.abs(data["relative_height"] - board_offset) <= config.board_vertical_tolerance)
         )
-        moving_board_motion = relative_speed <= config.board_relative_speed_tolerance
+        moving_board_motion = data["relative_speed"] <= config.board_relative_speed_tolerance
         static_board_motion = (
             (board_speed <= config.static_board_speed_tolerance)
-            & (foot_speed <= config.static_board_foot_speed_tolerance)
+            & (data["foot_speed"] <= config.static_board_foot_speed_tolerance)
         )
         skateboard_mask = board_geometry & (moving_board_motion | static_board_motion)
-        skateboard_mask = clean_mask_by_time(
+        board_masks[foot_name] = clean_mask_by_time(
             t,
             skateboard_mask,
             max_gap_time=config.max_gap_time,
             min_blip_time=config.min_state_time,
         )
 
+    floor_surface = _FloorSurface(
+        model=FloorModel.PLANE,
+        height=0.0,
+        up_axis=config.up_axis,
+        plane=None,
+    )
+    per_foot_ground_fit: dict[str, BoolArray] = {
+        name: np.zeros(len(t), dtype=bool) for name in config.foot_names
+    }
+    for _pass in range(config.floor_fit_refinement_passes):
+        if floor_surface.plane is None:
+            per_foot_ground_fit = _provisional_ground_fit_masks(
+                t,
+                per_foot,
+                board_masks,
+                config,
+            )
+        else:
+            refined = _refined_ground_fit_masks(
+                t,
+                per_foot,
+                board_masks,
+                floor_surface,
+                config,
+            )
+            if any(np.any(mask) for mask in refined.values()):
+                per_foot_ground_fit = refined
+        ground_fit_mask = np.zeros(len(t), dtype=bool)
+        for foot_mask in per_foot_ground_fit.values():
+            ground_fit_mask |= foot_mask
+        if not np.any(ground_fit_mask):
+            raise ValueError("No ground-contact frames available for floor plane fitting.")
+        fit_points = _floor_fit_samples_for_ground_masks(
+            per_foot_ground_fit,
+            config=config,
+            body_pos=body_pos,
+            foot_indices=foot_indices,
+            floor_fit_marker_pos=floor_fit_marker_pos,
+            floor_fit_marker_names=floor_fit_marker_names,
+            body_rotations=body_rotations,
+        )
+        floor_surface = _fit_plane_floor(fit_points, config)
+    ground_fit_mask = np.zeros(len(t), dtype=bool)
+    for foot_mask in per_foot_ground_fit.values():
+        ground_fit_mask |= foot_mask
+
+    states: dict[str, StateArray] = {}
+    features: dict[str, dict[str, FeatureArray]] = {}
+    all_intervals: dict[str, StateIntervals] = {}
+
+    for foot_name, data in per_foot.items():
+        clearance_point = data["clearance_point"]
+        floor_height_at_sole = floor_surface.height_at(clearance_point)
+        ground_clearance = floor_surface.clearance(clearance_point)
+        vertical_clearance = clearance_point[:, config.up_axis] - floor_height_at_sole
+        skateboard_mask = board_masks[foot_name]
+
         ground_mask = (
-            (np.abs(ground_clearance) <= config.ground_clearance_tolerance)
-            & (foot_speed <= config.ground_speed_tolerance)
+            (np.abs(vertical_clearance) <= config.ground_clearance_tolerance)
+            & (data["foot_speed"] <= config.ground_speed_tolerance)
         )
         ground_mask &= ~skateboard_mask
         ground_mask = clean_mask_by_time(
@@ -255,20 +362,32 @@ def classify_foot_support_states(
         state[skateboard_mask] = FootSupportState.SKATEBOARD
         states[foot_name] = state
 
+        sole_height = clearance_point[:, config.up_axis]
         features[foot_name] = {
-            "foot_height": foot_pos[:, config.up_axis],
+            "foot_height": data["foot_pos"][:, config.up_axis],
+            "sole_height": sole_height,
             "board_height": board_pos[:, config.up_axis],
-            "floor_height_at_foot": floor_height_at_foot,
+            "floor_height_at_foot": floor_height_at_sole,
+            "floor_height_at_sole": floor_height_at_sole,
             "ground_clearance": ground_clearance,
-            "horizontal_distance_to_board": horizontal_distance,
-            "relative_height_to_board": relative_height,
-            "foot_speed": foot_speed,
+            "vertical_ground_clearance": vertical_clearance,
+            "horizontal_distance_to_board": data["horizontal_distance"],
+            "relative_height_to_board": data["relative_height"],
+            "foot_speed": data["foot_speed"],
             "board_speed": board_speed,
-            "relative_speed_to_board": relative_speed,
+            "relative_speed_to_board": data["relative_speed"],
             "ground_mask": ground_mask,
+            "ground_fit_mask": ground_fit_mask,
             "skateboard_mask": skateboard_mask,
         }
         all_intervals[foot_name] = intervals_by_state(t, state)
+
+    if config.contact_surface_set is not None and (
+        floor_fit_marker_pos is None or body_rotations is None
+    ):
+        raise ValueError(
+            "contact_surface_set requires floor_fit_marker_pos and body_rotations."
+        )
 
     return FootSupportClassification(
         t=t,
@@ -284,15 +403,7 @@ def classify_foot_support_states(
 
 
 def intervals_by_state(t: ArrayLike, state: ArrayLike) -> StateIntervals:
-    """Convert a per-frame state array into intervals grouped by state label.
-
-    Args:
-        t: Timestamps with shape ``(N,)``.
-        state: Per-frame :class:`FootSupportState` values with shape ``(N,)``.
-
-    Returns:
-        Map from state label (``"air"``, ``"ground"``, ``"skateboard"``) to interval lists.
-    """
+    """Convert a per-frame state array into intervals grouped by state label."""
 
     state = np.asarray(state)
     return {
@@ -307,7 +418,7 @@ def intervals_by_state(t: ArrayLike, state: ArrayLike) -> StateIntervals:
 
 @dataclass(frozen=True)
 class _FloorSurface:
-    """Flat or planar floor model used by the foot-state classifier."""
+    """Planar floor model used by the foot-state classifier."""
 
     model: FloorModel
     height: float
@@ -316,31 +427,23 @@ class _FloorSurface:
 
     @property
     def normal(self) -> FloatArray | None:
-        """Plane normal for fitted-plane floors, otherwise ``None``."""
-
         if self.plane is None:
             return None
         return self.plane.normal
 
     @property
     def origin(self) -> FloatArray | None:
-        """Plane origin for fitted-plane floors, otherwise ``None``."""
-
         if self.plane is None:
             return None
         return self.plane.origin
 
     def clearance(self, points: ArrayLike) -> FloatArray:
-        """Signed distance or vertical clearance from the floor model."""
-
         points = np.asarray(points, dtype=float)
         if self.plane is not None:
             return self.plane.clearance(points)
         return points[:, self.up_axis] - self.height
 
     def height_at(self, points: ArrayLike) -> FloatArray:
-        """Floor height at each query point's horizontal location."""
-
         points = np.asarray(points, dtype=float)
         if self.plane is None:
             return np.full(len(points), self.height, dtype=float)
@@ -357,26 +460,168 @@ class _FloorSurface:
         return origin[self.up_axis] - (horizontal_delta @ horizontal_normal) / normal_up
 
 
-def _fit_floor_surface(foot_points: FloatArray, config: FootSupportConfig) -> _FloorSurface:
-    """Fit the configured floor model from observed foot rigid-body positions."""
+def _clearance_points(
+    foot_pos: FloatArray,
+    *,
+    foot_name: str,
+    sole_surfaces: Mapping[str, BodyContactSurface],
+    body_rotations: Mapping[str, FloatArray] | None,
+) -> FloatArray:
+    if foot_name not in sole_surfaces or body_rotations is None:
+        return foot_pos
+    return _sole_contact_points(
+        foot_pos,
+        body_rotations=body_rotations,
+        foot_name=foot_name,
+        sole=sole_surfaces[foot_name],
+    )
 
-    finite_mask = np.isfinite(foot_points).all(axis=1)
-    finite_points = foot_points[finite_mask]
-    if len(finite_points) == 0:
-        raise ValueError("Cannot estimate floor from non-finite foot positions.")
 
-    floor_model = normalize_enum(config.floor_model, FloorModel)
-    if floor_model == FloorModel.HEIGHT:
-        height = _estimate_floor_height(finite_points[:, config.up_axis], config.floor_low_percentile)
-        return _FloorSurface(model=FloorModel.HEIGHT, height=height, up_axis=config.up_axis)
+def _provisional_ground_fit_masks(
+    t: FloatArray,
+    per_foot: Mapping[str, Mapping[str, Any]],
+    board_masks: Mapping[str, BoolArray],
+    config: FootSupportConfig,
+) -> dict[str, BoolArray]:
+    """Seed per-foot ground-contact intervals from low sole/body height."""
+    heights: list[FloatArray] = []
+    for data in per_foot.values():
+        heights.append(np.asarray(data["clearance_point"][:, config.up_axis], dtype=np.float64))
+    stacked = np.concatenate(heights)
+    finite = stacked[np.isfinite(stacked)]
+    if finite.size == 0:
+        raise ValueError("Cannot seed ground intervals from non-finite sole heights.")
+    cutoff = float(
+        np.percentile(finite, config.provisional_ground_percentile)
+        + config.provisional_ground_height_slack
+    )
+    masks: dict[str, BoolArray] = {}
+    for foot_name, data in per_foot.items():
+        sole_z = data["clearance_point"][:, config.up_axis]
+        candidate = (
+            (sole_z <= cutoff)
+            & (data["foot_speed"] <= config.ground_speed_tolerance)
+            & ~board_masks[foot_name]
+            & np.isfinite(sole_z)
+        )
+        masks[foot_name] = clean_mask_by_time(
+            t,
+            candidate,
+            max_gap_time=config.max_gap_time,
+            min_blip_time=config.min_state_time,
+        )
+    return masks
 
-    if floor_model == FloorModel.PLANE:
-        cutoff = np.percentile(finite_points[:, config.up_axis], config.floor_plane_candidate_percentile)
-        candidate_points = finite_points[finite_points[:, config.up_axis] <= cutoff]
-        if len(candidate_points) < 3:
-            candidate_points = finite_points
-        if len(candidate_points) < 3:
-            raise ValueError("Need at least 3 finite foot positions to fit a floor plane.")
+
+def _refined_ground_fit_masks(
+    t: FloatArray,
+    per_foot: Mapping[str, Mapping[str, Any]],
+    board_masks: Mapping[str, BoolArray],
+    floor_surface: _FloorSurface,
+    config: FootSupportConfig,
+) -> dict[str, BoolArray]:
+    """Per-foot ground-contact intervals against the current floor plane (for refitting)."""
+    masks: dict[str, BoolArray] = {}
+    for foot_name, data in per_foot.items():
+        sole_z = data["clearance_point"][:, config.up_axis]
+        floor_z = floor_surface.height_at(data["clearance_point"])
+        vertical_clearance = sole_z - floor_z
+        candidate = (
+            (np.abs(vertical_clearance) <= config.ground_clearance_tolerance)
+            & (data["foot_speed"] <= config.ground_speed_tolerance)
+            & ~board_masks[foot_name]
+            & np.isfinite(vertical_clearance)
+        )
+        masks[foot_name] = clean_mask_by_time(
+            t,
+            candidate,
+            max_gap_time=config.max_gap_time,
+            min_blip_time=config.min_state_time,
+        )
+    return masks
+
+
+def _floor_fit_samples_for_ground_masks(
+    per_foot_masks: Mapping[str, BoolArray],
+    *,
+    config: FootSupportConfig,
+    body_pos: FloatArray,
+    foot_indices: list[int],
+    floor_fit_marker_pos: ArrayLike | None,
+    floor_fit_marker_names: Sequence[str] | None,
+    body_rotations: Mapping[str, FloatArray] | None,
+) -> FloatArray:
+    """Collect sole surface samples for each foot only on that foot's ground-contact frames."""
+    chunks: list[FloatArray] = []
+    surface_set = config.contact_surface_set
+
+    if floor_fit_marker_pos is not None:
+        marker_pos = np.asarray(floor_fit_marker_pos, dtype=float)
+        if marker_pos.ndim != 3 or marker_pos.shape[2] != 3:
+            raise ValueError("floor_fit_marker_pos must have shape (N, M, 3).")
+        names = tuple(floor_fit_marker_names or config.floor_fit_marker_names or ())
+        if len(names) != marker_pos.shape[1]:
+            raise ValueError("floor_fit_marker_names length must match floor_fit_marker_pos.")
+        if surface_set is None:
+            raise ValueError("contact_surface_set is required when floor_fit_marker_pos is set.")
+        name_to_patch = surface_set._marker_patch_index()
+        columns_by_body: dict[str, list[int]] = {}
+        for col, name in enumerate(names):
+            body = name_to_patch[name].attach_body
+            columns_by_body.setdefault(body, []).append(col)
+        for foot_name, foot_mask in per_foot_masks.items():
+            indices = np.flatnonzero(foot_mask)
+            if len(indices) == 0:
+                continue
+            cols = columns_by_body.get(foot_name)
+            if not cols:
+                continue
+            samples = marker_pos[np.ix_(indices, cols)].reshape(-1, 3)
+            col_names = tuple(names[col] for col in cols)
+            flat_names = marker_names_for_flat_trajectory(col_names, len(indices))
+            chunks.append(
+                apply_contact_surface_set(
+                    samples,
+                    flat_names,
+                    surface_set,
+                    body_rotations=_body_rotations_on_frames(body_rotations, indices),
+                )
+            )
+    else:
+        for foot_name, foot_idx in zip(config.foot_names, foot_indices):
+            indices = np.flatnonzero(per_foot_masks[foot_name])
+            if len(indices) == 0:
+                continue
+            chunks.append(body_pos[indices, foot_idx, :])
+
+    if not chunks:
+        raise ValueError("No sole samples on ground-contact frames for floor plane fitting.")
+    return np.vstack(chunks)
+
+
+def _body_rotations_on_frames(
+    body_rotations: Mapping[str, FloatArray] | None,
+    frame_indices: NDArray[np.intp],
+) -> dict[str, FloatArray] | None:
+    if body_rotations is None:
+        return None
+    return {
+        name: np.asarray(quats, dtype=np.float64)[frame_indices]
+        for name, quats in body_rotations.items()
+    }
+
+
+def _fit_plane_floor(points: FloatArray, config: FootSupportConfig) -> _FloorSurface:
+    finite_mask = np.isfinite(points).all(axis=1)
+    finite_points = points[finite_mask]
+    if len(finite_points) < config.min_floor_fit_samples:
+        raise ValueError(
+            f"Need at least {config.min_floor_fit_samples} finite sole samples on "
+            f"ground-contact frames to fit a floor plane; got {len(finite_points)}."
+        )
+    surface_set = config.contact_surface_set
+    use_tilted_plane = surface_set is not None and bool(surface_set.marker_patches)
+    if use_tilted_plane:
         support_config = SupportDetectionConfig(
             model_type=SupportModelType.PLANE,
             plane_residual_tolerance=config.floor_plane_residual_tolerance,
@@ -384,24 +629,27 @@ def _fit_floor_surface(foot_points: FloatArray, config: FootSupportConfig) -> _F
             random_seed=config.floor_plane_random_seed,
             up_axis=config.up_axis,
         )
-        plane = PlaneSupportModel.fit(candidate_points, support_config)
-        height = float(np.median(_FloorSurface(FloorModel.PLANE, 0.0, config.up_axis, plane).height_at(finite_points)))
-        return _FloorSurface(model=FloorModel.PLANE, height=height, up_axis=config.up_axis, plane=plane)
+        plane = PlaneSupportModel.fit(finite_points, support_config)
+    else:
+        plane = _fit_horizontal_plane(finite_points, config.up_axis)
+    height = float(
+        np.median(
+            _FloorSurface(FloorModel.PLANE, 0.0, config.up_axis, plane).height_at(finite_points)
+        )
+    )
+    return _FloorSurface(model=FloorModel.PLANE, height=height, up_axis=config.up_axis, plane=plane)
 
-    raise ValueError(f"Unsupported floor_model: {floor_model!r}")
 
-
-def _estimate_floor_height(foot_heights: FloatArray, low_percentile: float) -> float:
-    """Estimate the floor as the median of low observed foot heights."""
-
-    finite = foot_heights[np.isfinite(foot_heights)]
-    if finite.size == 0:
-        raise ValueError("Cannot estimate floor height from non-finite foot heights.")
-    cutoff = np.percentile(finite, low_percentile)
-    low = finite[finite <= cutoff]
-    if low.size == 0:
-        low = finite
-    return float(np.median(low))
+def _fit_horizontal_plane(points: FloatArray, up_axis: int) -> PlaneSupportModel:
+    """Fit a horizontal plane at the median height of ground-contact samples."""
+    horizontal_axes = [axis for axis in range(3) if axis != up_axis]
+    origin = np.zeros(3, dtype=np.float64)
+    origin[up_axis] = float(np.median(points[:, up_axis]))
+    origin[horizontal_axes[0]] = float(np.median(points[:, horizontal_axes[0]]))
+    origin[horizontal_axes[1]] = float(np.median(points[:, horizontal_axes[1]]))
+    normal = np.zeros(3, dtype=np.float64)
+    normal[up_axis] = 1.0
+    return PlaneSupportModel(normal=normal, origin=origin)
 
 
 def _estimate_board_contact_offset(
@@ -410,8 +658,6 @@ def _estimate_board_contact_offset(
     relative_speed: FloatArray,
     config: FootSupportConfig,
 ) -> float:
-    """Estimate the foot-board vertical offset from likely board-contact samples."""
-
     candidate_mask = (
         (horizontal_distance <= config.board_horizontal_tolerance)
         & (relative_height >= config.board_min_relative_height)
@@ -425,9 +671,63 @@ def _estimate_board_contact_offset(
     return float(np.median(candidates))
 
 
-def _body_index(body_names: list[str], name: str) -> int:
-    """Return a named body index or raise a message with available bodies."""
+def _compile_sole_surfaces(
+    config: FootSupportConfig,
+    *,
+    body_names: list[str],
+    body_pos: FloatArray,
+    floor_fit_marker_pos: ArrayLike | None,
+    floor_fit_marker_names: Sequence[str] | None,
+    body_rotations: Mapping[str, FloatArray] | None,
+) -> dict[str, BodyContactSurface]:
+    surface_set = config.contact_surface_set
+    if surface_set is None:
+        return {}
+    compiled = surface_set.body_surface_map()
+    if not surface_set.marker_patches:
+        return {name: compiled[name] for name in config.foot_names if name in compiled}
+    if floor_fit_marker_pos is None or body_rotations is None:
+        return {name: compiled[name] for name in config.foot_names if name in compiled}
+    marker_pos = np.asarray(floor_fit_marker_pos, dtype=float)
+    names = tuple(floor_fit_marker_names or config.floor_fit_marker_names or ())
+    marker_trajs = {names[col]: marker_pos[:, col, :] for col in range(len(names))}
+    body_positions = {
+        body_names[idx]: body_pos[:, idx, :] for idx in range(body_pos.shape[1])
+    }
+    frame_index = _first_finite_calibration_frame(marker_pos)
+    updated = surface_set.compile_body_surfaces(
+        marker_positions_world=marker_trajs,
+        body_positions=body_positions,
+        body_quaternions=dict(body_rotations),
+        frame_index=frame_index,
+    )
+    return updated.body_surface_map()
 
+
+def _first_finite_calibration_frame(marker_pos: FloatArray) -> int:
+    finite = np.isfinite(marker_pos).all(axis=(1, 2))
+    indices = np.flatnonzero(finite)
+    if len(indices) == 0:
+        return 0
+    return int(indices[len(indices) // 2])
+
+
+def _sole_contact_points(
+    foot_pos: FloatArray,
+    *,
+    body_rotations: Mapping[str, FloatArray],
+    foot_name: str,
+    sole: BodyContactSurface,
+) -> FloatArray:
+    quats = np.asarray(body_rotations[foot_name], dtype=np.float64)
+    out = np.empty_like(foot_pos)
+    for frame_idx in range(foot_pos.shape[0]):
+        rot = Rotation.from_quat(quats[frame_idx])
+        out[frame_idx] = sole.center_world(foot_pos[frame_idx], rot)
+    return out
+
+
+def _body_index(body_names: list[str], name: str) -> int:
     try:
         return body_names.index(name)
     except ValueError as exc:

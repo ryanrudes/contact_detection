@@ -25,7 +25,7 @@ class FootSupportClassificationTests(unittest.TestCase):
 
         left = body_pos[:, 0, :]
         left[:, 0] = -0.2
-        left[:, 1] = -0.75
+        left[:, 1] = -0.5
         left[:, 2] = 0.065
 
         right = body_pos[:, 1, :]
@@ -98,15 +98,34 @@ class FootSupportClassificationTests(unittest.TestCase):
         body_pos[:, 2, 1] = -1.0
         body_pos[:, 2, 2] = 0.14
 
+        from contact_detection.geometry import ContactSurfaceSet, MarkerAnchoredPatch
+
+        heel = np.column_stack([x, -0.5 * np.ones_like(t), floor_z])
+        toe = np.column_stack([x, -0.45 * np.ones_like(t), floor_z])
+        arch = np.column_stack([x, -0.48 * np.ones_like(t), floor_z])
+        marker_pos = np.stack([heel, arch, toe], axis=1)
+        sole = MarkerAnchoredPatch(
+            patch_markers=("heel", "arch", "toe"),
+            sample_offsets_body={
+                "heel": (0.0, 0.0, 0.0),
+                "arch": (0.0, 0.0, 0.0),
+                "toe": (0.0, 0.0, 0.0),
+            },
+            attach_body="Left_Shoe",
+        )
+        quats = np.tile(np.array([0.0, 0.0, 0.0, 1.0]), (len(t), 1))
         classification = classify_foot_support_states(
             t,
             body_names,
             body_pos,
             config=FootSupportConfig(
-                floor_model="plane",
                 ground_speed_tolerance=1.0,
                 board_horizontal_tolerance=0.05,
+                contact_surface_set=ContactSurfaceSet.from_marker_patches(sole),
+                floor_fit_marker_names=("heel", "arch", "toe"),
             ),
+            floor_fit_marker_pos=marker_pos,
+            body_rotations={"Left_Shoe": quats, "Right_Shoe": quats},
         )
 
         self.assertEqual(classification.floor_model, "plane")
@@ -114,9 +133,9 @@ class FootSupportClassificationTests(unittest.TestCase):
         self.assertIsNotNone(classification.floor_origin)
         self.assertTrue(np.all(classification.states["Left_Shoe"] == FootSupportState.GROUND))
         np.testing.assert_allclose(
-            classification.features["Left_Shoe"]["floor_height_at_foot"],
+            classification.features["Left_Shoe"]["floor_height_at_sole"],
             floor_z,
-            atol=1e-9,
+            atol=0.02,
         )
 
 

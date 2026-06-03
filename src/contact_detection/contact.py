@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Protocol, Sequence
 
 import numpy as np
@@ -22,6 +23,7 @@ from .quiet import (
     local_polynomial_derivative,
     score_hysteresis_mask,
 )
+from .geometry import ContactSurfaceSet, apply_contact_surface_set
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,12 @@ class SupportDetectionConfig:
         ransac_iterations (int): RANSAC trials for plane fitting.
         random_seed (int): RNG seed for RANSAC sampling.
         up_axis (int): World-axis index treated as vertical (0, 1, or 2).
+        contact_surface_set (ContactSurfaceSet | None): Marker patches that shift samples
+            onto nominal contact surfaces before fitting.
+        marker_names (tuple[str, ...] | None): Names for axis 1 when ``points`` is
+            ``(N, K, 3)``; required when :attr:`contact_surface_set` is set.
+        body_rotations (Mapping[str, FloatArray] | None): ``body_name → (N, 4)`` quaternions
+            for body-local marker patches (xyzw by default).
     """
 
     model_type: SupportModelType | str = SupportModelType.AUTO
@@ -59,9 +67,21 @@ class SupportDetectionConfig:
     ransac_iterations: int = 128
     random_seed: int = 17
     up_axis: int = 2
+    contact_surface_set: ContactSurfaceSet | None = None
+    marker_names: tuple[str, ...] | None = None
+    body_rotations: Mapping[str, FloatArray] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_type", normalize_enum(self.model_type, SupportModelType))
+        if self.contact_surface_set is not None and self.marker_names is None:
+            object.__setattr__(self, "marker_names", self.contact_surface_set.marker_names)
+        if self.contact_surface_set is not None:
+            for patch in self.contact_surface_set.marker_patches:
+                if patch.frame_spec.up_axis != self.up_axis:
+                    raise ValueError(
+                        "contact_surface_set patch frame_spec.up_axis must match "
+                        "SupportDetectionConfig.up_axis."
+                    )
 
 
 @dataclass(frozen=True)
@@ -614,7 +634,7 @@ def bootstrap_support_surface(
     """
 
     config = config or SupportDetectionConfig()
-    points = _validate_points_over_time(points)
+    points = _contact_patch_positions(_validate_points_over_time(points), config)
     candidates = find_support_candidates(t, points, quiet_config=quiet_config)
     filtered = filter_support_candidates(
         candidates,
@@ -670,6 +690,7 @@ def detect_contact_intervals(
     config = config or ContactDetectionConfig()
     t = np.asarray(t, dtype=float)
     points = _validate_points_over_time(points)
+    patch_points = _contact_patch_positions(points, config.support_config)
 
     if config.moving_support_mode:
         raise NotImplementedError("moving_support_mode is planned but not implemented yet")
@@ -702,13 +723,17 @@ def detect_contact_intervals(
     max_iterations = 1 if support_models else config.support_config.max_bootstrap_iterations
     for iteration in range(max_iterations):
         if not support_models:
-            support_model = fit_support_model_from_candidates(points, current_point_mask, config.support_config)
+            support_model = fit_support_model_from_candidates(
+                points,
+                current_point_mask,
+                config.support_config,
+            )
             support_models = [support_model]
         else:
             support_model = support_models[0]
 
         features = compute_support_relative_features(
-            points,
+            patch_points,
             velocities,
             support_model,
             quiet_debug,
@@ -803,6 +828,7 @@ def fit_support_model_from_candidates(
         Best support model for the selected samples (with low-point fallback).
     """
 
+    points = _contact_patch_positions(_validate_points_over_time(points), config)
     candidate_points = points[np.asarray(point_mask, dtype=bool)]
     if len(candidate_points) < config.min_support_points:
         fallback_count = min(max(config.min_support_points, 3), points.shape[0] * points.shape[1])
@@ -1117,6 +1143,24 @@ def _squared_ratio(value: ArrayLike, scale: ArrayLike) -> FloatArray:
     scale = np.asarray(scale, dtype=float)
     scale = np.where(scale > 1e-12, scale, 1.0)
     return (value / scale) ** 2
+
+
+def _contact_patch_positions(
+    points: FloatArray,
+    config: SupportDetectionConfig,
+) -> FloatArray:
+    """Shift marker positions onto the nominal contact patch when offsets are configured."""
+
+    if config.contact_surface_set is None:
+        return points
+    if config.marker_names is None:
+        raise ValueError("marker_names is required when contact_surface_set is set.")
+    return apply_contact_surface_set(
+        points,
+        config.marker_names,
+        config.contact_surface_set,
+        body_rotations=config.body_rotations,
+    )
 
 
 def _validate_points_over_time(points: ArrayLike) -> FloatArray:

@@ -19,11 +19,10 @@ foot_support:
   # Coordinate convention. Vicon data uses z-up.
   up_axis: 2
 
-  # Floor calibration. Use "plane" for robust lower-envelope plane fitting, or
-  # "height" for a single scalar floor height from low observed foot samples.
-  floor_model: plane
-  floor_low_percentile: 15.0
-  floor_plane_candidate_percentile: 50.0
+  # Floor plane is fit from sole-surface samples on ground-contact frames only.
+  provisional_ground_percentile: 25.0
+  provisional_ground_height_slack: 0.02
+  floor_fit_refinement_passes: 2
   floor_plane_residual_tolerance: 0.025
   floor_plane_ransac_iterations: 128
   floor_plane_random_seed: 17

@@ -12,5 +12,5 @@
 
 - NumPy-first contact-detection package plus `python main.py --config configs/config.yaml` for per-foot support-state diagnostic plots.
 - Trial input is motion-sync `synced.npz` (file or directory tree). Prefer `SyncClip.load` + `register_contacts` + `clip.detect(SKATE_FOOT_SUPPORT)` + `clip.save`, or `motion-sync detect foot-support <demo>`. `main.py` loads via `SyncClip` and writes diagnostic PNGs only.
-- Public imports should come from `contact_detection`. Core modules: `foot_support.py` (per-foot classifier), `contact.py` (support surfaces and intervals), `quiet.py` (scalar/vector/quaternion quiet detection).
+- Public imports should come from `contact_detection`. Core modules: `geometry.py` (body-to-contact-frame surfaces), `foot_support.py` (per-foot classifier), `contact.py` (support surfaces and intervals), `quiet.py` (scalar/vector/quaternion quiet detection).
 - Run `python -m unittest discover -s tests -v` and `ruff check .` (or `uv run --with ruff ruff check .`).

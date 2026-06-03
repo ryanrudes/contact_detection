@@ -10,12 +10,7 @@ from typing import Any, Iterable
 
 import yaml
 
-from contact_detection import (
-    FloorModel,
-    FootSupportConfig,
-    classify_foot_support_states,
-    normalize_enum,
-)
+from contact_detection import FootSupportConfig, classify_foot_support_states
 from contact_detection.debug import plot_foot_support_states
 
 DEFAULT_CONFIG_PATH = Path("configs/config.yaml")
@@ -110,28 +105,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--right-name", default=None)
     parser.add_argument("--board-name", default=None)
     parser.add_argument(
-        "--floor-model",
-        choices=tuple(member.value for member in FloorModel),
-        default=None,
-        help="Use one scalar floor height or fit a robust floor plane from foot positions.",
-    )
-    parser.add_argument(
-        "--floor-low-percentile",
-        type=float,
-        default=None,
-        help="Low foot-height percentile used by --floor-model height.",
-    )
-    parser.add_argument(
         "--floor-plane-residual-tolerance",
         type=float,
         default=None,
-        help="RANSAC inlier tolerance in meters for --floor-model plane.",
+        help="RANSAC inlier tolerance in meters for the ground plane fit.",
     )
     parser.add_argument(
-        "--floor-plane-candidate-percentile",
+        "--provisional-ground-percentile",
         type=float,
         default=None,
-        help="Foot-height percentile used to select lower-envelope candidates for plane fitting.",
+        help="Sole-height percentile used to seed ground-contact intervals before plane refit.",
     )
     show_group = parser.add_mutually_exclusive_group()
     show_group.add_argument(
@@ -200,17 +183,12 @@ def build_foot_support_config(
 
         for cli_name, config_name in (
             ("board_name", "board_name"),
-            ("floor_model", "floor_model"),
-            ("floor_low_percentile", "floor_low_percentile"),
-            ("floor_plane_candidate_percentile", "floor_plane_candidate_percentile"),
             ("floor_plane_residual_tolerance", "floor_plane_residual_tolerance"),
+            ("provisional_ground_percentile", "provisional_ground_percentile"),
         ):
             cli_value = getattr(args, cli_name, None)
             if cli_value is not None:
                 values[config_name] = cli_value
-
-    if "floor_model" in values:
-        values["floor_model"] = normalize_enum(values["floor_model"], FloorModel)
 
     return FootSupportConfig(**values)
 

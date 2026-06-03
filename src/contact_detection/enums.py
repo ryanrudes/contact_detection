@@ -37,8 +37,8 @@ class FloorModel(StrEnum):
     """Floor geometry used by per-foot support classification.
 
     Attributes:
-        HEIGHT (str): Scalar lower-foot-height floor model (``"height"``).
-        PLANE (str): Robust plane fit to low foot samples (``"plane"``).
+        HEIGHT (str): Legacy label retained for metadata only (fitting removed).
+        PLANE (str): Plane fit from sole samples on ground-contact frames (``"plane"``).
     """
 
     HEIGHT = "height"

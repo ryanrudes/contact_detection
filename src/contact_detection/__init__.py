@@ -8,6 +8,7 @@ values; see :data:`contact_detection.__all__` for the supported public surface.
 Modules:
     quiet: Scalar, vector, and quaternion quiet-interval detection.
     contact: Support-surface fitting and marker contact intervals.
+    geometry: Body-to-contact-frame surfaces and marker-anchored patches.
     foot_support: Per-foot air / ground / skateboard classification.
     intervals: Boolean mask ↔ interval conversion and summaries.
     enums: Shared string enums and :func:`normalize_enum`.
@@ -36,6 +37,23 @@ from .contact import (
     score_contact_features,
 )
 from .intervals import IntervalSummary, mask_from_intervals, summarize_intervals
+from .geometry import (
+    BodyContactSurface,
+    ContactFrameMode,
+    ContactFrameSpec,
+    ContactSurfaceRegion,
+    ContactSurfaceSet,
+    InfinitePlaneRegion,
+    MarkerAnchoredPatch,
+    PointSamplesRegion,
+    RectangleExtents,
+    RigidTransform,
+    SampleHullRegion,
+    apply_contact_surface_set,
+    fit_plane_frame_from_points,
+    marker_names_for_flat_trajectory,
+    rotation_matrices_from_quaternions,
+)
 from .enums import (
     FloorModel,
     QuietSignalType,
@@ -70,25 +88,37 @@ from .quiet import (
 )
 
 __all__ = [
+    "BodyContactSurface",
     "ContactDetectionConfig",
     "ContactDetectionResult",
+    "ContactFrameMode",
+    "ContactFrameSpec",
+    "ContactSurfaceRegion",
+    "ContactSurfaceSet",
     "FloorModel",
     "FootSupportClassification",
     "FootSupportConfig",
     "FootSupportState",
     "HeightmapSupportModel",
+    "InfinitePlaneRegion",
     "IntervalSummary",
     "LocalPercentileHeightmap",
+    "MarkerAnchoredPatch",
     "PlaneSupportModel",
+    "PointSamplesRegion",
     "QuietDetectionConfig",
     "QuietDetectionResult",
     "QuietSignalType",
+    "RectangleExtents",
+    "RigidTransform",
+    "SampleHullRegion",
     "SupportCandidate",
     "SupportCandidateSet",
     "SupportDetectionConfig",
     "SupportModel",
     "SupportModelType",
     "VectorQuietMode",
+    "apply_contact_surface_set",
     "bootstrap_support_surface",
     "classify_foot_support_states",
     "clean_mask_by_time",
@@ -100,16 +130,19 @@ __all__ = [
     "filter_support_candidates",
     "find_support_candidates",
     "fit_best_support_surface",
+    "fit_plane_frame_from_points",
     "fit_plane_svd",
     "fit_support_model_from_candidates",
     "intervals_from_mask",
     "intervals_by_state",
     "local_polynomial_derivative",
+    "marker_names_for_flat_trajectory",
     "mask_from_intervals",
     "normalize_enum",
     "quaternion_angular_speed",
     "quaternion_local_spread",
     "quaternion_standardize_xyzw",
+    "rotation_matrices_from_quaternions",
     "score_contact_features",
     "score_hysteresis_mask",
     "summarize_intervals",

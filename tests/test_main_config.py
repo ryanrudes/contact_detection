@@ -22,8 +22,7 @@ plot:
 foot_support:
   foot_names: [Left_Shoe, Right_Shoe]
   board_name: Skateboard
-  floor_model: plane
-  floor_plane_candidate_percentile: 40.0
+  provisional_ground_percentile: 40.0
   ground_speed_tolerance: 0.3
 """,
                 encoding="utf-8",
@@ -34,8 +33,7 @@ foot_support:
 
         self.assertEqual(config.foot_names, ("Left_Shoe", "Right_Shoe"))
         self.assertEqual(config.board_name, "Skateboard")
-        self.assertEqual(config.floor_model, "plane")
-        self.assertEqual(config.floor_plane_candidate_percentile, 40.0)
+        self.assertEqual(config.provisional_ground_percentile, 40.0)
         self.assertEqual(config.ground_speed_tolerance, 0.3)
 
     def test_cli_values_override_yaml_config(self):
@@ -43,10 +41,8 @@ foot_support:
             left_name="L",
             right_name=None,
             board_name="Deck",
-            floor_model="height",
-            floor_low_percentile=None,
-            floor_plane_candidate_percentile=None,
             floor_plane_residual_tolerance=0.04,
+            provisional_ground_percentile=None,
         )
 
         config = build_foot_support_config(
@@ -54,7 +50,7 @@ foot_support:
                 "foot_support": {
                     "foot_names": ["Left_Shoe", "Right_Shoe"],
                     "board_name": "Skateboard",
-                    "floor_model": "plane",
+                    "provisional_ground_percentile": 30.0,
                 }
             },
             args,
@@ -62,7 +58,7 @@ foot_support:
 
         self.assertEqual(config.foot_names, ("L", "Right_Shoe"))
         self.assertEqual(config.board_name, "Deck")
-        self.assertEqual(config.floor_model, "height")
+        self.assertEqual(config.provisional_ground_percentile, 30.0)
         self.assertEqual(config.floor_plane_residual_tolerance, 0.04)
 
 
