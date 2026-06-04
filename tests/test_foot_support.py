@@ -98,20 +98,23 @@ class FootSupportClassificationTests(unittest.TestCase):
         body_pos[:, 2, 1] = -1.0
         body_pos[:, 2, 2] = 0.14
 
-        from contact_detection.geometry import ContactSurfaceSet, MarkerAnchoredPatch
+        from contact_detection.geometry import BodyFrameTranslation, PatchCalibration, RigidBodyContactModel
 
         heel = np.column_stack([x, -0.5 * np.ones_like(t), floor_z])
         toe = np.column_stack([x, -0.45 * np.ones_like(t), floor_z])
         arch = np.column_stack([x, -0.48 * np.ones_like(t), floor_z])
         marker_pos = np.stack([heel, arch, toe], axis=1)
-        sole = MarkerAnchoredPatch(
-            patch_markers=("heel", "arch", "toe"),
-            sample_offsets_body={
-                "heel": (0.0, 0.0, 0.0),
-                "arch": (0.0, 0.0, 0.0),
-                "toe": (0.0, 0.0, 0.0),
+        sole = RigidBodyContactModel(
+            body_name="Left_Shoe",
+            patch_calibrations={
+                "sole": PatchCalibration(
+                    marker_translations={
+                        "heel": BodyFrameTranslation([0.0, 0.0, 0.0]),
+                        "arch": BodyFrameTranslation([0.0, 0.0, 0.0]),
+                        "toe": BodyFrameTranslation([0.0, 0.0, 0.0]),
+                    }
+                )
             },
-            attach_body="Left_Shoe",
         )
         quats = np.tile(np.array([0.0, 0.0, 0.0, 1.0]), (len(t), 1))
         classification = classify_foot_support_states(
@@ -121,7 +124,7 @@ class FootSupportClassificationTests(unittest.TestCase):
             config=FootSupportConfig(
                 ground_speed_tolerance=1.0,
                 board_horizontal_tolerance=0.05,
-                contact_surface_set=ContactSurfaceSet.from_marker_patches(sole),
+                contact_models=(sole,),
                 floor_fit_marker_names=("heel", "arch", "toe"),
             ),
             floor_fit_marker_pos=marker_pos,

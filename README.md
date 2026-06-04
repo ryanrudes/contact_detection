@@ -103,41 +103,46 @@ body root frame to a contact frame whose **+Z axis is the outward normal** (away
 from the partner surface), plus an optional tangent-plane region.
 
 ```python
+from scipy.spatial.transform import Rotation
+
 from contact_detection import (
-    ContactFrameSpec,
-    ContactSurfaceSet,
-    MarkerAnchoredPatch,
+    BodyFrameTranslation,
+    PatchCalibration,
+    RigidBodyContactModel,
     RigidTransform,
 )
 
-sole = MarkerAnchoredPatch(
-    patch_markers=("heel", "toe"),
-    sample_offsets_body={
-        "heel": (0.0, 0.0, -0.025),  # body-local meters from marker to sole sample
-        "toe": (0.0, 0.0, -0.015),
+shoe = RigidBodyContactModel(
+    body_name="Left_Shoe",
+    patch_calibrations={
+        "sole": PatchCalibration(
+            marker_translations={
+                "heel": BodyFrameTranslation(vector_body=(0.0, 0.0, -0.025)),
+                "toe": BodyFrameTranslation(vector_body=(0.0, 0.0, -0.015)),
+            }
+        )
     },
-    attach_body="Left_Shoe",
-    frame_spec=ContactFrameSpec.fit_plane_from_samples(up_axis=2),
 )
-surface = sole.compile(
-    marker_positions_world=heel_toe_world,  # (2, 3) at one calibration frame
+compiled = shoe.compile(
+    marker_positions_world={"heel": heel_world, "toe": toe_world},
     body_translation=body_origin,
-    body_quaternion_xyzw=body_quat_xyzw,
+    body_rotation=Rotation.from_quat(body_quat_xyzw),
 )
-# surface.frame is T_body_contact; use ContactSurfaceSet for floor-fit sample shifting
+sole = compiled.patch("sole")
+view = sole.view(RigidTransform(translation=body_origin, rotation=Rotation.from_quat(body_quat_xyzw)))
 ```
 
-For foot-support plane floors, pass `contact_surface_set=ContactSurfaceSet.from_marker_patches(sole, ...)`
-with `floor_fit_marker_pos` and per-body quaternions. The plane is fit from sole-surface samples on
+For foot-support plane floors, pass `contact_models=(shoe, ...)` with
+`floor_fit_marker_pos` and per-body quaternions. The plane is fit from sole-surface samples on
 **ground-contact** frames (seeded provisionally, then refined); clearance and plots use the compiled
 sole contact origin (`sole_height` / `floor_height_at_sole` features).
 
-For contact-interval detection, pass the same `ContactSurfaceSet` on
+For contact-interval detection, pass the same contact models on
 `SupportDetectionConfig` together with per-body quaternions when offsets are
 body-local:
 
 ```python
-from contact_detection import ContactDetectionConfig, ContactSurfaceSet, detect_contact_intervals
+from contact_detection import ContactDetectionConfig, SupportDetectionConfig, detect_contact_intervals
 
 result = detect_contact_intervals(
     t,
@@ -145,7 +150,7 @@ result = detect_contact_intervals(
     config=ContactDetectionConfig(
         support_config=SupportDetectionConfig(
             marker_names=("heel", "toe"),
-            contact_surface_set=ContactSurfaceSet.from_marker_patches(sole),
+            contact_models=(shoe,),
             body_rotations={"Left_Shoe": body_quat_xyzw},
         )
     ),

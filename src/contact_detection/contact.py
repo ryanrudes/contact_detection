@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from collections.abc import Mapping
-from typing import Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -23,7 +23,11 @@ from .quiet import (
     local_polynomial_derivative,
     score_hysteresis_mask,
 )
-from .geometry import ContactSurfaceSet, apply_contact_surface_set
+from .geometry import (
+    RigidBodyContactModel,
+    apply_contact_model_offsets,
+    marker_names_for_contact_models,
+)
 
 
 @dataclass(frozen=True)
@@ -45,10 +49,10 @@ class SupportDetectionConfig:
         ransac_iterations (int): RANSAC trials for plane fitting.
         random_seed (int): RNG seed for RANSAC sampling.
         up_axis (int): World-axis index treated as vertical (0, 1, or 2).
-        contact_surface_set (ContactSurfaceSet | None): Marker patches that shift samples
+        contact_models (tuple[RigidBodyContactModel[Any], ...]): Contact models that shift samples
             onto nominal contact surfaces before fitting.
         marker_names (tuple[str, ...] | None): Names for axis 1 when ``points`` is
-            ``(N, K, 3)``; required when :attr:`contact_surface_set` is set.
+            ``(N, K, 3)``; required when :attr:`contact_models` is non-empty.
         body_rotations (Mapping[str, FloatArray] | None): ``body_name → (N, 4)`` quaternions
             for body-local marker patches (xyzw by default).
     """
@@ -67,21 +71,20 @@ class SupportDetectionConfig:
     ransac_iterations: int = 128
     random_seed: int = 17
     up_axis: int = 2
-    contact_surface_set: ContactSurfaceSet | None = None
+    contact_models: tuple[RigidBodyContactModel[Any], ...] = ()
     marker_names: tuple[str, ...] | None = None
     body_rotations: Mapping[str, FloatArray] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_type", normalize_enum(self.model_type, SupportModelType))
-        if self.contact_surface_set is not None and self.marker_names is None:
-            object.__setattr__(self, "marker_names", self.contact_surface_set.marker_names)
-        if self.contact_surface_set is not None:
-            for patch in self.contact_surface_set.marker_patches:
-                if patch.frame_spec.up_axis != self.up_axis:
-                    raise ValueError(
-                        "contact_surface_set patch frame_spec.up_axis must match "
-                        "SupportDetectionConfig.up_axis."
-                    )
+        object.__setattr__(self, "contact_models", tuple(self.contact_models or ()))
+        if self.contact_models and self.marker_names is None:
+            object.__setattr__(self, "marker_names", marker_names_for_contact_models(self.contact_models))
+        for model in self.contact_models:
+            if model.up_axis != self.up_axis:
+                raise ValueError(
+                    "contact model up axis must match SupportDetectionConfig.up_axis."
+                )
 
 
 @dataclass(frozen=True)
@@ -1151,14 +1154,14 @@ def _contact_patch_positions(
 ) -> FloatArray:
     """Shift marker positions onto the nominal contact patch when offsets are configured."""
 
-    if config.contact_surface_set is None:
+    if not config.contact_models:
         return points
     if config.marker_names is None:
-        raise ValueError("marker_names is required when contact_surface_set is set.")
-    return apply_contact_surface_set(
+        raise ValueError("marker_names is required when contact models are set.")
+    return apply_contact_model_offsets(
         points,
         config.marker_names,
-        config.contact_surface_set,
+        config.contact_models,
         body_rotations=config.body_rotations,
     )
 

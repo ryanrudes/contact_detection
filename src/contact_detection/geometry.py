@@ -1,16 +1,19 @@
-"""Canonical contact-surface geometry: body-root to contact-frame transforms.
+"""Body-local contact geometry and marker-to-surface calibration.
 
-Convention:
-    Each :class:`BodyContactSurface` stores ``T_body_contact`` (:class:`RigidTransform`).
-    Contact-frame **+Z** is the **outward** normal (away from the partner surface).
-    ``p_body = R @ p_contact + t`` for points in the contact frame.
+The canonical representation is intentionally split in two:
+
+* persistent model objects are expressed in a rigid body's local frame;
+* world-frame quantities are views induced by a particular body pose.
+
+Contact-frame ``+Z`` is the outward normal, away from the partner surface.
 """
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from enum import StrEnum
+from dataclasses import dataclass, field
+from enum import IntEnum, StrEnum
 from typing import Any, Generic, TypeVar
 
 import numpy as np
@@ -24,66 +27,95 @@ MarkerT = TypeVar("MarkerT")
 
 @dataclass(frozen=True)
 class RigidTransform:
-    """Fixed rigid transform mapping contact-frame points into the body root frame.
+    """Rigid transform from a child frame into a parent frame.
 
     Attributes:
-        translation: Contact-frame origin in body coordinates, shape ``(3,)``.
-        rotation: Orientation of the contact frame relative to the body (scipy ``Rotation``).
+        translation: Child-frame origin in parent coordinates, shape ``(3,)``.
+        rotation: Child-frame orientation relative to the parent frame.
     """
 
     translation: FloatArray
-    rotation: Rotation
+    rotation: Rotation = field(default_factory=Rotation.identity)
 
     def __post_init__(self) -> None:
-        t = np.asarray(self.translation, dtype=np.float64).reshape(3)
-        object.__setattr__(self, "translation", t)
+        object.__setattr__(
+            self,
+            "translation",
+            np.asarray(self.translation, dtype=np.float64).reshape(3),
+        )
 
     @classmethod
     def identity(cls) -> RigidTransform:
-        """Identity transform (contact frame coincident with body root)."""
-        return cls(translation=np.zeros(3, dtype=np.float64), rotation=Rotation.identity())
+        """Return the identity transform."""
+
+        return cls(translation=np.zeros(3, dtype=np.float64))
 
     @classmethod
     def from_matrix(cls, matrix: ArrayLike) -> RigidTransform:
-        """Build from a ``(4, 4)`` homogeneous matrix (body from contact)."""
+        """Build from a homogeneous ``(4, 4)`` matrix."""
+
         mat = np.asarray(matrix, dtype=np.float64)
         if mat.shape != (4, 4):
             raise ValueError("matrix must have shape (4, 4).")
-        return cls(
-            translation=mat[:3, 3].copy(),
-            rotation=Rotation.from_matrix(mat[:3, :3]),
-        )
+        return cls(translation=mat[:3, 3], rotation=Rotation.from_matrix(mat[:3, :3]))
 
     def as_matrix(self) -> FloatArray:
-        """Return ``(4, 4)`` homogeneous matrix mapping contact → body."""
-        out = np.eye(4, dtype=np.float64)
-        out[:3, :3] = self.rotation.as_matrix()
-        out[:3, 3] = self.translation
-        return out
+        """Return a homogeneous ``(4, 4)`` matrix."""
+
+        matrix = np.eye(4, dtype=np.float64)
+        matrix[:3, :3] = self.rotation.as_matrix()
+        matrix[:3, 3] = self.translation
+        return matrix
 
     def inverse(self) -> RigidTransform:
-        """Return the transform mapping body-frame points into the contact frame."""
-        rot_inv = self.rotation.inv()
+        """Return the inverse transform."""
+
+        rotation_inv = self.rotation.inv()
         return RigidTransform(
-            translation=rot_inv.apply(-self.translation),
-            rotation=rot_inv,
+            translation=rotation_inv.apply(-self.translation),
+            rotation=rotation_inv,
         )
 
     def compose(self, other: RigidTransform) -> RigidTransform:
-        """Compose as ``self @ other`` (apply ``other`` first, then ``self``)."""
-        rot = self.rotation * other.rotation
-        trans = self.translation + self.rotation.apply(other.translation)
-        return RigidTransform(translation=trans, rotation=rot)
+        """Return ``self @ other``; ``other`` is applied first."""
 
-    def rectangle_corners_contact(
-        self,
-        half_width: float,
-        half_length: float,
-    ) -> FloatArray:
-        """Rectangle corners on the contact plane (z=0) expressed in the parent frame."""
+        return RigidTransform(
+            translation=self.translation + self.rotation.apply(other.translation),
+            rotation=self.rotation * other.rotation,
+        )
+
+    def transform_points(self, points: ArrayLike) -> FloatArray:
+        """Map child-frame points into the parent frame."""
+
+        arr = np.asarray(points, dtype=np.float64)
+        flat = arr.reshape(-1, 3)
+        transformed = self.rotation.apply(flat) + self.translation
+        return np.asarray(transformed.reshape(arr.shape), dtype=np.float64)
+
+    def inverse_transform_points(self, points: ArrayLike) -> FloatArray:
+        """Map parent-frame points into the child frame."""
+
+        arr = np.asarray(points, dtype=np.float64)
+        flat = arr.reshape(-1, 3)
+        transformed = self.rotation.inv().apply(flat - self.translation)
+        return np.asarray(transformed.reshape(arr.shape), dtype=np.float64)
+
+    @property
+    def z_axis(self) -> FloatArray:
+        """Child ``+Z`` axis expressed in parent coordinates."""
+
+        axis = self.rotation.apply(np.array([0.0, 0.0, 1.0], dtype=np.float64))
+        norm = float(np.linalg.norm(axis))
+        if norm <= 1e-12:
+            raise ValueError("transform has a degenerate +Z axis.")
+        return axis / norm
+
+    def rectangle_corners_xy(self, half_width: float, half_length: float) -> FloatArray:
+        """Rectangle corners on the child ``z=0`` plane, expressed in parent coordinates."""
+
         if half_width < 0 or half_length < 0:
             raise ValueError("half_width and half_length must be non-negative.")
-        local = np.array(
+        local = np.asarray(
             [
                 [-half_width, -half_length, 0.0],
                 [half_width, -half_length, 0.0],
@@ -94,50 +126,146 @@ class RigidTransform:
         )
         return self.transform_points(local)
 
-    def transform_points(self, points: ArrayLike) -> FloatArray:
-        """Map contact-frame points to body frame, preserving trailing shape ``(..., 3)``."""
-        arr = np.asarray(points, dtype=np.float64)
-        flat = arr.reshape(-1, 3)
-        out = self.rotation.apply(flat) + self.translation
-        return np.asarray(out.reshape(arr.shape), dtype=np.float64)
 
-    def inverse_transform_points(self, points: ArrayLike) -> FloatArray:
-        """Map body-frame points to the contact frame."""
-        arr = np.asarray(points, dtype=np.float64)
-        flat = arr.reshape(-1, 3)
-        out = self.rotation.inv().apply(flat - self.translation)
-        return np.asarray(out.reshape(arr.shape), dtype=np.float64)
+@dataclass(frozen=True)
+class SignedAxis:
+    """A concrete coordinate axis with sign."""
 
-    def outward_normal_body(self) -> FloatArray:
-        """Unit outward normal (+Z contact axis) expressed in the body frame."""
-        normal = self.rotation.apply(np.array([0.0, 0.0, 1.0], dtype=np.float64))
-        norm = float(np.linalg.norm(normal))
-        if norm < 1e-12:
-            raise ValueError("contact frame normal is degenerate.")
-        return normal / norm
+    axis: "CoordinateAxis"
+    sign: int = 1
 
-    def compose_world(self, body_translation: ArrayLike, body_rotation: Rotation) -> RigidTransform:
-        """Return ``T_world_contact`` given ``T_world_body``."""
-        body = RigidTransform(
-            translation=np.asarray(body_translation, dtype=np.float64).reshape(3),
-            rotation=body_rotation,
-        )
-        return body.compose(self)
+    def __post_init__(self) -> None:
+        if self.sign not in {-1, 1}:
+            raise ValueError("sign must be either -1 or +1.")
+
+    def __pos__(self) -> SignedAxis:
+        return self
+
+    def __neg__(self) -> SignedAxis:
+        return SignedAxis(axis=self.axis, sign=-self.sign)
+
+    def vector(self) -> FloatArray:
+        """Return this axis as a unit vector."""
+
+        vector = np.zeros(3, dtype=np.float64)
+        vector[int(self.axis)] = float(self.sign)
+        return vector
+
+
+class CoordinateAxis(IntEnum):
+    """Concrete coordinate dimensions."""
+
+    X = 0
+    Y = 1
+    Z = 2
+
+    def __pos__(self) -> SignedAxis:
+        return SignedAxis(axis=self, sign=1)
+
+    def __neg__(self) -> SignedAxis:
+        return SignedAxis(axis=self, sign=-1)
 
 
 @dataclass(frozen=True)
-class InfinitePlaneRegion:
-    """Unbounded tangent plane (partner is a half-space)."""
+class SemanticAxisTranslation:
+    """Marker-to-surface displacement along a semantic body axis."""
+
+    axis: "SemanticAxis"
+    distance: float
+
+    def __mul__(self, scale: float) -> SemanticAxisTranslation:
+        return SemanticAxisTranslation(axis=self.axis, distance=float(scale) * self.distance)
+
+    def __rmul__(self, scale: float) -> SemanticAxisTranslation:
+        return self * scale
+
+    def __neg__(self) -> SemanticAxisTranslation:
+        return -1.0 * self
+
+    def resolve(self, body: RigidBodyContactModel[Any]) -> FloatArray:
+        """Return the concrete body-frame displacement."""
+
+        return self.distance * body.axis(self.axis)
+
+
+class SemanticAxis(StrEnum):
+    """Semantic local body directions."""
+
+    RIGHT = "right"
+    FORWARD = "forward"
+    UP = "up"
+
+    def __pos__(self) -> SemanticAxisTranslation:
+        return SemanticAxisTranslation(axis=self, distance=1.0)
+
+    def __neg__(self) -> SemanticAxisTranslation:
+        return SemanticAxisTranslation(axis=self, distance=-1.0)
+
+    def __mul__(self, distance: float) -> SemanticAxisTranslation:
+        return SemanticAxisTranslation(axis=self, distance=float(distance))
+
+    def __rmul__(self, distance: float) -> SemanticAxisTranslation:
+        return self * distance
 
 
 @dataclass(frozen=True)
-class RectangleExtents:
-    """Axis-aligned rectangle in the contact tangent plane (contact X/Y).
+class AxisConvention:
+    """Mapping from semantic local axes to concrete coordinate directions."""
 
-    Attributes:
-        half_width: Half extent along contact +X (meters).
-        half_length: Half extent along contact +Y (meters).
-    """
+    axes: Mapping[SemanticAxis, SignedAxis]
+
+    def signed_axis(self, axis: SemanticAxis) -> SignedAxis:
+        """Return the signed coordinate axis for ``axis``."""
+
+        try:
+            return self.axes[axis]
+        except KeyError as exc:
+            raise KeyError(f"axis convention does not define {axis.value!r}") from exc
+
+    def vector(self, axis: SemanticAxis) -> FloatArray:
+        """Return a semantic axis as a body-frame vector."""
+
+        return self.signed_axis(axis).vector()
+
+
+Z_UP_AXES = AxisConvention(
+    {
+        SemanticAxis.RIGHT: -CoordinateAxis.Y,
+        SemanticAxis.FORWARD: +CoordinateAxis.X,
+        SemanticAxis.UP: +CoordinateAxis.Z,
+    }
+)
+Y_UP_AXES = AxisConvention(
+    {
+        SemanticAxis.RIGHT: +CoordinateAxis.X,
+        SemanticAxis.FORWARD: +CoordinateAxis.Z,
+        SemanticAxis.UP: +CoordinateAxis.Y,
+    }
+)
+MUJOCO_AXES = Z_UP_AXES
+ISAAC_AXES = Z_UP_AXES
+
+
+class ContactRegion(ABC):
+    """Finite or infinite region on a contact patch's local ``z=0`` plane."""
+
+    @abstractmethod
+    def contains(self, xy: ArrayLike) -> bool:
+        """Return whether a contact-plane ``(x, y)`` point lies in the region."""
+
+
+@dataclass(frozen=True)
+class InfinitePlaneRegion(ContactRegion):
+    """Unbounded tangent plane."""
+
+    def contains(self, xy: ArrayLike) -> bool:
+        _ = np.asarray(xy, dtype=np.float64).reshape(2)
+        return True
+
+
+@dataclass(frozen=True)
+class RectangularRegion(ContactRegion):
+    """Axis-aligned rectangle in the contact tangent plane."""
 
     half_width: float
     half_length: float
@@ -146,173 +274,345 @@ class RectangleExtents:
         if self.half_width < 0 or self.half_length < 0:
             raise ValueError("half_width and half_length must be non-negative.")
 
+    @classmethod
+    def from_size(cls, width: float, length: float) -> RectangularRegion:
+        """Build from full extents."""
+
+        return cls(half_width=float(width) / 2.0, half_length=float(length) / 2.0)
+
+    def contains(self, xy: ArrayLike) -> bool:
+        x, y = np.asarray(xy, dtype=np.float64).reshape(2)
+        return bool(abs(float(x)) <= self.half_width and abs(float(y)) <= self.half_length)
+
 
 @dataclass(frozen=True)
-class PointSamplesRegion:
-    """Fixed sample points in the contact frame (shape ``(K, 3)``)."""
+class SampleHullRegion(ContactRegion):
+    """Convex hull implied by contact-frame sample points."""
 
     points_contact: FloatArray
 
     def __post_init__(self) -> None:
-        pts = np.asarray(self.points_contact, dtype=np.float64)
-        if pts.ndim != 2 or pts.shape[1] != 3:
-            raise ValueError("points_contact must have shape (K, 3).")
-        object.__setattr__(self, "points_contact", pts)
+        points = np.asarray(self.points_contact, dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise ValueError("points_contact must have shape (samples, 3).")
+        object.__setattr__(self, "points_contact", points)
+
+    def contains(self, xy: ArrayLike) -> bool:
+        """Return an axis-aligned hull test over the projected samples."""
+
+        point = np.asarray(xy, dtype=np.float64).reshape(2)
+        if self.points_contact.size == 0:
+            return False
+        mins = np.min(self.points_contact[:, :2], axis=0)
+        maxs = np.max(self.points_contact[:, :2], axis=0)
+        return bool(np.all(point >= mins) and np.all(point <= maxs))
 
 
 @dataclass(frozen=True)
-class SampleHullRegion:
-    """Convex hull of sample points in the contact tangent plane (XY)."""
+class BodyFrameTranslation:
+    """Explicit body-frame marker-to-surface displacement."""
 
-    points_contact: FloatArray
-
-    def __post_init__(self) -> None:
-        pts = np.asarray(self.points_contact, dtype=np.float64)
-        if pts.ndim != 2 or pts.shape[1] != 3:
-            raise ValueError("points_contact must have shape (K, 3).")
-        object.__setattr__(self, "points_contact", pts)
-
-
-ContactSurfaceRegion = InfinitePlaneRegion | RectangleExtents | PointSamplesRegion | SampleHullRegion
-
-
-class ContactFrameMode(StrEnum):
-    """How :class:`MarkerAnchoredPatch` derives ``T_body_contact`` at compile time."""
-
-    EXPLICIT = "explicit"
-    FIT_PLANE_FROM_SAMPLES = "fit_plane_from_samples"
-    FIT_FROM_BODY_AXES = "fit_from_body_axes"
-
-
-@dataclass(frozen=True)
-class ContactFrameSpec:
-    """Specification for deriving the contact frame from marker samples.
-
-    Attributes:
-        mode: Compile-time frame derivation strategy.
-        explicit: Fixed ``T_body_contact`` when ``mode`` is ``explicit``.
-        up_axis: World/capture vertical axis used to orient +Z outward (0, 1, or 2).
-        body_up_axis: Body axis index for ``fit_from_body_axes`` (0, 1, or 2).
-    """
-
-    mode: ContactFrameMode | str = ContactFrameMode.FIT_PLANE_FROM_SAMPLES
-    explicit: RigidTransform | None = None
-    up_axis: int = 2
-    body_up_axis: int = 2
+    vector_body: FloatArray
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "mode", ContactFrameMode(self.mode))
-        if self.up_axis not in (0, 1, 2) or self.body_up_axis not in (0, 1, 2):
-            raise ValueError("up_axis and body_up_axis must be 0, 1, or 2.")
-        if self.mode == ContactFrameMode.EXPLICIT and self.explicit is None:
-            raise ValueError("explicit transform is required when mode is 'explicit'.")
-
-    @classmethod
-    def fit_plane_from_samples(cls, *, up_axis: int = 2) -> ContactFrameSpec:
-        """Fit plane to body-local surface samples; +Z is outward normal."""
-        return cls(mode=ContactFrameMode.FIT_PLANE_FROM_SAMPLES, up_axis=up_axis)
-
-    @classmethod
-    def fit_from_body_axes(cls, *, body_up_axis: int = 2, up_axis: int = 2) -> ContactFrameSpec:
-        """Use a body axis as outward normal; origin at sample centroid."""
-        return cls(
-            mode=ContactFrameMode.FIT_FROM_BODY_AXES,
-            body_up_axis=body_up_axis,
-            up_axis=up_axis,
+        object.__setattr__(
+            self,
+            "vector_body",
+            np.asarray(self.vector_body, dtype=np.float64).reshape(3),
         )
 
     @classmethod
-    def with_explicit(cls, transform: RigidTransform) -> ContactFrameSpec:
-        """Use a user-supplied ``T_body_contact``."""
-        return cls(mode=ContactFrameMode.EXPLICIT, explicit=transform)
+    def zeros(cls) -> BodyFrameTranslation:
+        """Return a zero displacement."""
+
+        return cls(np.zeros(3, dtype=np.float64))
+
+    def __mul__(self, scale: float) -> BodyFrameTranslation:
+        return BodyFrameTranslation(vector_body=float(scale) * self.vector_body)
+
+    def __rmul__(self, scale: float) -> BodyFrameTranslation:
+        return self * scale
+
+    def __neg__(self) -> BodyFrameTranslation:
+        return -1.0 * self
+
+    def resolve(self, body: RigidBodyContactModel[Any]) -> FloatArray:
+        """Return the concrete body-frame displacement."""
+
+        _ = body
+        return self.vector_body
+
+
+MarkerTranslation = BodyFrameTranslation | SemanticAxisTranslation
 
 
 @dataclass(frozen=True)
-class BodyContactSurface:
-    """Canonical contact surface attached to one rigid body.
+class PatchCalibration(Generic[MarkerT]):
+    """Marker-to-surface calibration for one contact patch."""
 
-    Attributes:
-        attach_body: Rigid-body name (Vicon subject).
-        frame: ``T_body_contact`` — contact frame expressed in body root coordinates.
-        region: Tangent-plane extent or sample geometry in the contact frame.
-    """
+    marker_translations: Mapping[MarkerT, MarkerTranslation]
+    region: ContactRegion | None = None
 
-    attach_body: str
-    frame: RigidTransform
-    region: ContactSurfaceRegion = InfinitePlaneRegion()
+    def __post_init__(self) -> None:
+        if not self.marker_translations:
+            raise ValueError("marker_translations must not be empty.")
 
-    def outward_normal_world(
+    @classmethod
+    def from_markers(
+        cls,
+        markers: Sequence[MarkerT],
+        *,
+        translation: MarkerTranslation | None = None,
+        region: ContactRegion | None = None,
+    ) -> PatchCalibration[MarkerT]:
+        """Build a calibration with the same displacement for each marker."""
+
+        if not markers:
+            raise ValueError("markers must not be empty.")
+        if len(frozenset(markers)) != len(markers):
+            raise ValueError("markers must not contain duplicates.")
+        marker_translation = translation or BodyFrameTranslation.zeros()
+        return cls(
+            marker_translations={marker: marker_translation for marker in markers},
+            region=region,
+        )
+
+    @property
+    def markers(self) -> tuple[MarkerT, ...]:
+        """Markers in declared calibration order."""
+
+        return tuple(self.marker_translations)
+
+    @property
+    def marker_names(self) -> tuple[str, ...]:
+        """String marker names in declared calibration order."""
+
+        return tuple(_marker_name(marker) for marker in self.marker_translations)
+
+    def surface_points(
         self,
-        body_translation: ArrayLike,
-        body_rotation: Rotation,
+        marker_positions_body: Mapping[MarkerT | str, ArrayLike],
+        body: RigidBodyContactModel[MarkerT],
     ) -> FloatArray:
-        """Outward normal in world coordinates at one time step."""
-        world = self.frame.compose_world(body_translation, body_rotation)
-        normal = world.rotation.apply(np.array([0.0, 0.0, 1.0], dtype=np.float64))
-        norm = float(np.linalg.norm(normal))
-        return normal / norm if norm > 1e-12 else normal
+        """Return calibrated body-frame surface samples."""
 
-    def center_world(
+        points: list[np.ndarray] = []
+        for marker, translation in self.marker_translations.items():
+            marker_key = _marker_lookup_key(marker, marker_positions_body)
+            marker_position = np.asarray(marker_positions_body[marker_key], dtype=np.float64).reshape(3)
+            points.append(marker_position + translation.resolve(body))
+        return np.stack(points, axis=0)
+
+    def build_patch(
         self,
-        body_translation: ArrayLike,
-        body_rotation: Rotation,
-    ) -> FloatArray:
+        marker_positions_body: Mapping[MarkerT | str, ArrayLike],
+        body: RigidBodyContactModel[MarkerT],
+    ) -> ContactPatch:
+        """Fit and return a persistent body-local contact patch."""
+
+        samples_body = self.surface_points(marker_positions_body, body)
+        frame = fit_patch_frame_from_points(samples_body, up_axis=body.up_axis)
+        region = self.region or SampleHullRegion(frame.inverse_transform_points(samples_body))
+        return ContactPatch(transform_body_patch=frame, region=region)
+
+
+@dataclass(frozen=True)
+class ContactPatch:
+    """Persistent body-local contact surface."""
+
+    transform_body_patch: RigidTransform
+    region: ContactRegion = field(default_factory=InfinitePlaneRegion)
+
+    def view(self, transform_world_body: RigidTransform) -> ContactPatchView:
+        """Return a pose-dependent world-frame view."""
+
+        return ContactPatchView(patch=self, transform_world_body=transform_world_body)
+
+
+@dataclass(frozen=True)
+class ContactPatchView:
+    """World-frame view of a body-local contact patch."""
+
+    patch: ContactPatch
+    transform_world_body: RigidTransform
+
+    @property
+    def transform_world_patch(self) -> RigidTransform:
+        """Patch frame in world coordinates."""
+
+        return self.transform_world_body.compose(self.patch.transform_body_patch)
+
+    @property
+    def contact_point_world(self) -> FloatArray:
         """Contact-frame origin in world coordinates."""
-        world = self.frame.compose_world(body_translation, body_rotation)
-        return world.translation.copy()
 
-    def clearance_along_normal(
+        return self.transform_world_patch.translation.copy()
+
+    @property
+    def normal_world(self) -> FloatArray:
+        """Contact outward normal in world coordinates."""
+
+        return self.transform_world_patch.z_axis
+
+    def clearance_along_normal(self, world_point: ArrayLike) -> float:
+        """Signed clearance from the patch origin along the outward normal."""
+
+        delta = np.asarray(world_point, dtype=np.float64).reshape(3) - self.contact_point_world
+        return float(delta @ self.normal_world)
+
+
+@dataclass(frozen=True)
+class RigidBodyContactModel(Generic[MarkerT]):
+    """Contact model attached to one tracked rigid body."""
+
+    body_name: str
+    marker_type: type[MarkerT] | None = None
+    axis_convention: AxisConvention = Z_UP_AXES
+    patch_calibrations: Mapping[str, PatchCalibration[MarkerT]] = field(default_factory=dict)
+    patches: Mapping[str, ContactPatch] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.body_name:
+            raise ValueError("body_name must not be empty.")
+        if not self.patch_calibrations and not self.patches:
+            raise ValueError("RigidBodyContactModel requires patch_calibrations or patches.")
+
+    @property
+    def up_axis(self) -> int:
+        """Concrete coordinate axis used for semantic ``UP``."""
+
+        return int(self.axis_convention.signed_axis(SemanticAxis.UP).axis)
+
+    @property
+    def marker_names(self) -> tuple[str, ...]:
+        """All marker names used by the patch calibrations."""
+
+        names: list[str] = []
+        for calibration in self.patch_calibrations.values():
+            names.extend(calibration.marker_names)
+        return tuple(dict.fromkeys(names))
+
+    @property
+    def patch_names(self) -> tuple[str, ...]:
+        """Patch names available on this model."""
+
+        return tuple(dict.fromkeys((*self.patches.keys(), *self.patch_calibrations.keys())))
+
+    def axis(self, axis: SemanticAxis) -> FloatArray:
+        """Return a semantic axis as a body-frame vector."""
+
+        return self.axis_convention.vector(axis)
+
+    def marker_translation(self, marker_name: str) -> MarkerTranslation:
+        """Return the marker-to-surface translation for ``marker_name``."""
+
+        for calibration in self.patch_calibrations.values():
+            for marker, translation in calibration.marker_translations.items():
+                if _marker_name(marker) == marker_name:
+                    return translation
+        raise KeyError(f"marker {marker_name!r} is not part of body {self.body_name!r}")
+
+    def compile(
         self,
-        world_point: ArrayLike,
+        *,
+        marker_positions_world: Mapping[str, ArrayLike],
         body_translation: ArrayLike,
         body_rotation: Rotation,
-    ) -> float:
-        """Signed clearance along outward normal (positive = separated)."""
-        center = self.center_world(body_translation, body_rotation)
-        normal = self.outward_normal_world(body_translation, body_rotation)
-        delta = np.asarray(world_point, dtype=np.float64).reshape(3) - center
-        return float(delta @ normal)
+    ) -> RigidBodyContactModel[MarkerT]:
+        """Return a copy with calibrations compiled into body-local patches."""
+
+        body_transform = RigidTransform(
+            translation=np.asarray(body_translation, dtype=np.float64).reshape(3),
+            rotation=body_rotation,
+        )
+        world_to_body = body_transform.inverse()
+        patches = dict(self.patches)
+        for name, calibration in self.patch_calibrations.items():
+            marker_positions_body: dict[str, FloatArray] = {}
+            for marker_name in calibration.marker_names:
+                if marker_name not in marker_positions_world:
+                    raise KeyError(f"missing marker {marker_name!r} for body {self.body_name!r}")
+                marker_positions_body[marker_name] = world_to_body.transform_points(
+                    np.asarray(marker_positions_world[marker_name], dtype=np.float64).reshape(1, 3)
+                )[0]
+            patches[name] = calibration.build_patch(marker_positions_body, self)
+        return RigidBodyContactModel(
+            body_name=self.body_name,
+            marker_type=self.marker_type,
+            axis_convention=self.axis_convention,
+            patch_calibrations=self.patch_calibrations,
+            patches=patches,
+        )
+
+    def view(self, transform_world_body: RigidTransform) -> RigidBodyContactView:
+        """Return a pose-dependent world-frame view."""
+
+        return RigidBodyContactView(model=self, transform_world_body=transform_world_body)
+
+    def patch(self, name: str | None = None) -> ContactPatch:
+        """Return one compiled patch."""
+
+        patch_name = name or _first_patch_name(self)
+        try:
+            return self.patches[patch_name]
+        except KeyError as exc:
+            raise KeyError(f"patch {patch_name!r} is not compiled for body {self.body_name!r}") from exc
+
+    def surface_sample_delta_body(self, marker_name: str) -> FloatArray:
+        """Return marker-to-surface displacement in body coordinates."""
+
+        return self.marker_translation(marker_name).resolve(self)
 
 
-def fit_plane_frame_from_points(
-    points_body: ArrayLike,
-    *,
-    up_axis: int = 2,
-) -> RigidTransform:
-    """Fit ``T_body_contact`` from body-local sample points (SVD plane + centroid).
+@dataclass(frozen=True)
+class RigidBodyContactView(Generic[MarkerT]):
+    """World-frame view of a rigid body contact model."""
 
-    The contact +Z axis is the plane normal, flipped so ``normal[up_axis] >= 0``.
-    Contact +X is the principal in-plane axis from SVD.
-    """
-    pts = np.asarray(points_body, dtype=np.float64).reshape(-1, 3)
-    finite = pts[np.isfinite(pts).all(axis=1)]
+    model: RigidBodyContactModel[MarkerT]
+    transform_world_body: RigidTransform
+
+    def patch(self, name: str | None = None) -> ContactPatchView:
+        """Return a patch view."""
+
+        return self.model.patch(name).view(self.transform_world_body)
+
+
+def fit_patch_frame_from_points(points_body: ArrayLike, *, up_axis: int = 2) -> RigidTransform:
+    """Fit a contact frame from body-local surface samples."""
+
+    if up_axis not in (0, 1, 2):
+        raise ValueError("up_axis must be 0, 1, or 2.")
+    points = np.asarray(points_body, dtype=np.float64).reshape(-1, 3)
+    finite = points[np.isfinite(points).all(axis=1)]
     if finite.shape[0] < 3:
-        raise ValueError("Need at least 3 finite points to fit a contact plane frame.")
+        raise ValueError("Need at least 3 finite points to fit a contact patch.")
     centroid = np.mean(finite, axis=0)
     centered = finite - centroid
-    if float(np.max(np.linalg.norm(centered, axis=1))) < 1e-9:
-        raise ValueError("Points are too colocated to fit a contact plane.")
+    if float(np.max(np.linalg.norm(centered, axis=1))) <= 1e-9:
+        raise ValueError("Points are too colocated to fit a contact patch.")
     _, _, vh = np.linalg.svd(centered, full_matrices=False)
     normal = np.asarray(vh[-1], dtype=np.float64)
-    norm = float(np.linalg.norm(normal))
-    if norm < 1e-12:
-        raise ValueError("Degenerate plane normal from SVD.")
-    normal /= norm
+    normal_norm = float(np.linalg.norm(normal))
+    if normal_norm <= 1e-12:
+        raise ValueError("Degenerate contact patch normal.")
+    normal /= normal_norm
     if normal[up_axis] < 0.0:
         normal = -normal
     tangent = np.asarray(vh[0], dtype=np.float64)
     tangent -= normal * float(tangent @ normal)
-    t_norm = float(np.linalg.norm(tangent))
-    if t_norm < 1e-12:
+    tangent_norm = float(np.linalg.norm(tangent))
+    if tangent_norm <= 1e-12:
         reference = np.array([1.0, 0.0, 0.0], dtype=np.float64)
         if abs(float(normal @ reference)) > 0.9:
             reference = np.array([0.0, 1.0, 0.0], dtype=np.float64)
         tangent = np.cross(normal, reference)
-        t_norm = float(np.linalg.norm(tangent))
-    tangent /= t_norm
+        tangent_norm = float(np.linalg.norm(tangent))
+    tangent /= tangent_norm
     bitangent = np.cross(normal, tangent)
-    rot_matrix = np.column_stack([tangent, bitangent, normal])
-    return RigidTransform(translation=centroid, rotation=Rotation.from_matrix(rot_matrix))
+    return RigidTransform(
+        translation=centroid,
+        rotation=Rotation.from_matrix(np.column_stack([tangent, bitangent, normal])),
+    )
 
 
 def rotation_matrices_from_quaternions(
@@ -321,14 +621,14 @@ def rotation_matrices_from_quaternions(
     scalar_last: bool = True,
 ) -> NDArray[np.float64]:
     """Return rotation matrices with shape ``(N, 3, 3)`` from unit quaternions."""
+
     q = np.asarray(quaternions, dtype=np.float64)
     if q.ndim != 2 or q.shape[1] != 4:
         raise ValueError("quaternions must have shape (N, 4).")
     if not scalar_last:
         q = q[:, [1, 2, 3, 0]]
     norms = np.linalg.norm(q, axis=1, keepdims=True)
-    norms = np.where(norms > 1e-12, norms, 1.0)
-    q = q / norms
+    q = q / np.where(norms > 1e-12, norms, 1.0)
     x, y, z, w = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
     matrices = np.empty((len(q), 3, 3), dtype=np.float64)
     matrices[:, 0, 0] = 1 - 2 * (y * y + z * z)
@@ -343,345 +643,167 @@ def rotation_matrices_from_quaternions(
     return matrices
 
 
-def marker_names_for_flat_trajectory(
-    marker_names: Sequence[str],
-    n_frames: int,
-) -> list[str]:
+def marker_names_for_flat_trajectory(marker_names: Sequence[str], n_frames: int) -> list[str]:
     """Expand marker names to match ``(N, K, 3).reshape(N * K, 3)`` row-major order."""
+
     if n_frames < 0:
         raise ValueError("n_frames must be non-negative.")
     return [name for _ in range(n_frames) for name in marker_names]
 
 
-def _body_local_marker_samples(
-    marker_positions_world: FloatArray,
-    body_translation: FloatArray,
-    body_rotation_matrix: NDArray[np.float64],
-    sample_offsets_body: Mapping[Any, tuple[float, float, float]],
-    marker_order: Sequence[Any],
+def marker_names_for_contact_models(models: Sequence[RigidBodyContactModel[Any]]) -> tuple[str, ...]:
+    """Return unique marker names used by a collection of contact models."""
+
+    names: list[str] = []
+    for model in models:
+        names.extend(model.marker_names)
+    return tuple(dict.fromkeys(names))
+
+
+def apply_contact_model_offsets(
+    points: ArrayLike,
+    marker_names: Sequence[str],
+    models: Sequence[RigidBodyContactModel[Any]],
+    *,
+    body_rotations: Mapping[str, FloatArray] | None = None,
+    quaternion_scalar_last: bool = True,
 ) -> FloatArray:
-    """Return body-local surface sample points for one calibration frame."""
-    rot = np.asarray(body_rotation_matrix, dtype=np.float64)
-    if rot.shape != (3, 3):
-        raise ValueError("body_rotation_matrix must have shape (3, 3).")
-    body_t = np.asarray(body_translation, dtype=np.float64).reshape(3)
-    pts = np.asarray(marker_positions_world, dtype=np.float64)
-    if pts.shape[0] != len(marker_order):
-        raise ValueError("marker_positions_world rows must match patch_markers length.")
-    samples: list[np.ndarray] = []
-    for idx, marker in enumerate(marker_order):
-        p_world = pts[idx].reshape(3)
-        p_body = rot.T @ (p_world - body_t)
-        delta = np.asarray(sample_offsets_body[marker], dtype=np.float64).reshape(3)
-        samples.append(p_body + delta)
-    return np.stack(samples, axis=0)
+    """Shift marker positions to calibrated surface samples in world coordinates."""
+
+    arr = np.asarray(points, dtype=np.float64)
+    if not models:
+        return arr
+    marker_to_model = _marker_model_index(models)
+    if arr.ndim == 2 and arr.shape[1] == 3:
+        if len(marker_names) != arr.shape[0]:
+            raise ValueError("marker_names length must match points.shape[0].")
+        out = arr.copy()
+        markers_per_frame = len(marker_names_for_contact_models(models))
+        flat_trajectory = markers_per_frame > 0 and len(marker_names) > markers_per_frame
+        for row, marker_name in enumerate(marker_names):
+            model = marker_to_model[marker_name]
+            frame_index = row // markers_per_frame if flat_trajectory else 0
+            rotation = _rotation_for_model(
+                model,
+                frame_index=frame_index,
+                body_rotations=body_rotations,
+                quaternion_scalar_last=quaternion_scalar_last,
+            )
+            out[row] += rotation @ model.surface_sample_delta_body(marker_name)
+        return out
+    if arr.ndim == 3 and arr.shape[2] == 3:
+        if len(marker_names) != arr.shape[1]:
+            raise ValueError("marker_names length must match points.shape[1].")
+        out = arr.copy()
+        for frame_index in range(arr.shape[0]):
+            for col, marker_name in enumerate(marker_names):
+                model = marker_to_model[marker_name]
+                rotation = _rotation_for_model(
+                    model,
+                    frame_index=frame_index,
+                    body_rotations=body_rotations,
+                    quaternion_scalar_last=quaternion_scalar_last,
+                )
+                out[frame_index, col] += rotation @ model.surface_sample_delta_body(marker_name)
+        return out
+    raise ValueError("points must have shape (M, 3) or (N, K, 3).")
 
 
-def _resolve_marker_key(marker: Any) -> str:
+def compile_contact_models(
+    models: Sequence[RigidBodyContactModel[Any]],
+    *,
+    marker_positions_world: Mapping[str, FloatArray],
+    body_positions: Mapping[str, FloatArray],
+    body_quaternions: Mapping[str, FloatArray],
+    frame_index: int = 0,
+    quaternion_scalar_last: bool = True,
+) -> tuple[RigidBodyContactModel[Any], ...]:
+    """Compile marker calibrations into body-local patches for each model."""
+
+    compiled: list[RigidBodyContactModel[Any]] = []
+    for model in models:
+        marker_positions = {
+            name: np.asarray(marker_positions_world[name][frame_index], dtype=np.float64)
+            for name in model.marker_names
+        }
+        body_position = np.asarray(body_positions[model.body_name][frame_index], dtype=np.float64)
+        body_quat = np.asarray(body_quaternions[model.body_name][frame_index], dtype=np.float64)
+        if not quaternion_scalar_last:
+            body_quat = body_quat[[1, 2, 3, 0]]
+        compiled.append(
+            model.compile(
+                marker_positions_world=marker_positions,
+                body_translation=body_position,
+                body_rotation=Rotation.from_quat(body_quat),
+            )
+        )
+    return tuple(compiled)
+
+
+def model_for_marker(
+    models: Sequence[RigidBodyContactModel[Any]],
+    marker_name: str,
+) -> RigidBodyContactModel[Any]:
+    """Return the contact model that owns ``marker_name``."""
+
+    return _marker_model_index(models)[marker_name]
+
+
+def model_map(models: Sequence[RigidBodyContactModel[Any]]) -> dict[str, RigidBodyContactModel[Any]]:
+    """Return contact models keyed by body name."""
+
+    return {model.body_name: model for model in models}
+
+
+def _marker_name(marker: Any) -> str:
     return str(marker.value) if hasattr(marker, "value") else str(marker)
 
 
-@dataclass(frozen=True)
-class MarkerAnchoredPatch(Generic[MarkerT]):
-    """Authoring spec: markers plus body-local offsets to nominal surface samples.
-
-    Attributes:
-        patch_markers: Markers defining the patch (column order for floor-fit stacks).
-        sample_offsets_body: Body-local displacement from each marker to a surface sample.
-        attach_body: Rigid-body name the markers belong to.
-        frame_spec: How to derive ``T_body_contact`` at compile time.
-        region_spec: Optional region override; defaults to sample hull from compile.
-    """
-
-    patch_markers: tuple[MarkerT, ...]
-    sample_offsets_body: Mapping[MarkerT, tuple[float, float, float]]
-    attach_body: str
-    frame_spec: ContactFrameSpec = ContactFrameSpec.fit_plane_from_samples()
-    region_spec: ContactSurfaceRegion | None = None
-
-    def __post_init__(self) -> None:
-        if not self.patch_markers:
-            raise ValueError("patch_markers must not be empty.")
-        patch_set = frozenset(self.patch_markers)
-        if len(patch_set) != len(self.patch_markers):
-            raise ValueError("patch_markers must not contain duplicates.")
-        offset_keys = frozenset(self.sample_offsets_body)
-        if offset_keys != patch_set:
-            missing = patch_set - offset_keys
-            extra = offset_keys - patch_set
-            raise ValueError(
-                f"sample_offsets_body keys must match patch_markers; "
-                f"missing={[ _resolve_marker_key(m) for m in missing ]!r}, "
-                f"extra={[ _resolve_marker_key(m) for m in extra ]!r}"
-            )
-
-    @property
-    def marker_names(self) -> tuple[str, ...]:
-        """String marker names for NPZ / detection pipelines."""
-        return tuple(_resolve_marker_key(m) for m in self.patch_markers)
-
-    def compile(
-        self,
-        *,
-        marker_positions_world: ArrayLike,
-        body_translation: ArrayLike,
-        body_rotation_matrix: ArrayLike | None = None,
-        body_quaternion_xyzw: ArrayLike | None = None,
-        quaternion_scalar_last: bool = True,
-    ) -> BodyContactSurface:
-        """Derive :class:`BodyContactSurface` from one calibration pose.
-
-        Provide either ``body_rotation_matrix`` ``(3, 3)`` or ``body_quaternion_xyzw`` ``(4,)``.
-        """
-        if body_rotation_matrix is None:
-            if body_quaternion_xyzw is None:
-                raise ValueError("body_rotation_matrix or body_quaternion_xyzw is required.")
-            rot = rotation_matrices_from_quaternions(
-                np.asarray(body_quaternion_xyzw, dtype=np.float64).reshape(1, 4),
-                scalar_last=quaternion_scalar_last,
-            )[0]
-        else:
-            rot = np.asarray(body_rotation_matrix, dtype=np.float64)
-
-        samples_body = _body_local_marker_samples(
-            np.asarray(marker_positions_world, dtype=np.float64),
-            np.asarray(body_translation, dtype=np.float64),
-            rot,
-            self.sample_offsets_body,
-            self.patch_markers,
-        )
-
-        spec = self.frame_spec
-        if spec.mode == ContactFrameMode.EXPLICIT:
-            assert spec.explicit is not None
-            frame = spec.explicit
-        elif spec.mode == ContactFrameMode.FIT_PLANE_FROM_SAMPLES:
-            frame = fit_plane_frame_from_points(samples_body, up_axis=spec.up_axis)
-        elif spec.mode == ContactFrameMode.FIT_FROM_BODY_AXES:
-            centroid = np.mean(samples_body, axis=0)
-            axis = np.zeros(3, dtype=np.float64)
-            axis[spec.body_up_axis] = 1.0
-            if axis[spec.up_axis] < 0:
-                axis = -axis
-            tangent = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-            if abs(float(axis @ tangent)) > 0.9:
-                tangent = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-            tangent -= axis * float(tangent @ axis)
-            tangent /= np.linalg.norm(tangent)
-            bitangent = np.cross(axis, tangent)
-            rot_mat = np.column_stack([tangent, bitangent, axis])
-            frame = RigidTransform(translation=centroid, rotation=Rotation.from_matrix(rot_mat))
-        else:
-            raise ValueError(f"Unsupported ContactFrameMode: {spec.mode!r}")
-
-        region = self.region_spec
-        if region is None:
-            samples_contact = frame.inverse_transform_points(samples_body)
-            region = SampleHullRegion(points_contact=samples_contact)
-
-        return BodyContactSurface(
-            attach_body=self.attach_body,
-            frame=frame,
-            region=region,
-        )
-
-    def _marker_index(self, marker_name: str) -> int:
-        for index, marker in enumerate(self.patch_markers):
-            if _resolve_marker_key(marker) == marker_name:
-                return index
-        raise KeyError(f"marker {marker_name!r} not in patch")
-
-    def world_delta(
-        self,
-        marker_name: str,
-        *,
-        rotation: NDArray[np.float64],
-    ) -> FloatArray:
-        """World-frame displacement for one marker at a single time."""
-        index = self._marker_index(marker_name)
-        marker = self.patch_markers[index]
-        local = np.asarray(self.sample_offsets_body[marker], dtype=np.float64).reshape(3)
-        return np.asarray(rotation, dtype=np.float64) @ local
-
-    def world_sample_positions(
-        self,
-        marker_positions_world: ArrayLike,
-        *,
-        body_rotation_matrix: NDArray[np.float64] | None = None,
-        body_quaternion_xyzw: ArrayLike | None = None,
-        quaternion_scalar_last: bool = True,
-    ) -> FloatArray:
-        """Apply body-local offsets to world marker positions for one frame, shape ``(K, 3)``."""
-        points = np.asarray(marker_positions_world, dtype=np.float64)
-        if points.shape != (len(self.patch_markers), 3):
-            raise ValueError("marker_positions_world must have shape (len(patch_markers), 3).")
-        rotation = body_rotation_matrix
-        if rotation is None:
-            if body_quaternion_xyzw is None:
-                raise ValueError("body_rotation_matrix or body_quaternion_xyzw is required.")
-            rotation = rotation_matrices_from_quaternions(
-                np.asarray(body_quaternion_xyzw, dtype=np.float64).reshape(1, 4),
-                scalar_last=quaternion_scalar_last,
-            )[0]
-        out = points.copy()
-        for index, marker in enumerate(self.patch_markers):
-            local = np.asarray(self.sample_offsets_body[marker], dtype=np.float64).reshape(3)
-            out[index] += rotation @ local
-        return out
+def _marker_lookup_key(
+    marker: Any,
+    mapping: Mapping[MarkerT | str, ArrayLike],
+) -> MarkerT | str:
+    if marker in mapping:
+        return marker
+    name = _marker_name(marker)
+    if name in mapping:
+        return name
+    raise KeyError(f"missing marker position for {name!r}")
 
 
-def _rotation_for_marker_patch(
-    patch: MarkerAnchoredPatch[Any],
+def _first_patch_name(model: RigidBodyContactModel[Any]) -> str:
+    names = model.patch_names
+    if not names:
+        raise KeyError(f"body {model.body_name!r} has no patches")
+    return names[0]
+
+
+def _marker_model_index(
+    models: Sequence[RigidBodyContactModel[Any]],
+) -> dict[str, RigidBodyContactModel[Any]]:
+    index: dict[str, RigidBodyContactModel[Any]] = {}
+    for model in models:
+        for marker_name in model.marker_names:
+            if marker_name in index:
+                raise ValueError(f"marker {marker_name!r} appears in multiple contact models.")
+            index[marker_name] = model
+    return index
+
+
+def _rotation_for_model(
+    model: RigidBodyContactModel[Any],
     *,
     frame_index: int,
     body_rotations: Mapping[str, FloatArray] | None,
     quaternion_scalar_last: bool,
 ) -> NDArray[np.float64]:
     if body_rotations is None:
-        raise ValueError(
-            f"body_rotations required for marker patch on body {patch.attach_body!r}."
-        )
-    matrices = rotation_matrices_from_quaternions(
-        body_rotations[patch.attach_body],
+        raise ValueError(f"body_rotations required for contact model {model.body_name!r}.")
+    try:
+        quaternions = body_rotations[model.body_name]
+    except KeyError as exc:
+        raise KeyError(f"missing rotations for body {model.body_name!r}") from exc
+    return rotation_matrices_from_quaternions(
+        np.asarray(quaternions, dtype=np.float64),
         scalar_last=quaternion_scalar_last,
-    )
-    return matrices[frame_index]
-
-
-@dataclass(frozen=True)
-class ContactSurfaceSet:
-    """One or more contact surfaces / marker patches for detection and floor fit.
-
-    Attributes:
-        marker_patches: Authoring patches used to shift marker samples (floor fit).
-        body_surfaces: Compiled canonical surfaces keyed by body name.
-    """
-
-    marker_patches: tuple[MarkerAnchoredPatch[Any], ...] = ()
-    body_surfaces: tuple[tuple[str, BodyContactSurface], ...] = ()
-
-    def __post_init__(self) -> None:
-        if not self.marker_patches and not self.body_surfaces:
-            raise ValueError("ContactSurfaceSet requires marker_patches and/or body_surfaces.")
-        names: list[str] = []
-        for patch in self.marker_patches:
-            names.extend(patch.marker_names)
-        if len(names) != len(frozenset(names)):
-            raise ValueError("marker names must be unique across marker_patches.")
-
-    @property
-    def marker_names(self) -> tuple[str, ...]:
-        """All marker names in patch order."""
-        return tuple(name for patch in self.marker_patches for name in patch.marker_names)
-
-    @classmethod
-    def from_marker_patches(cls, *patches: MarkerAnchoredPatch[Any]) -> ContactSurfaceSet:
-        """Build a set used only for marker-based floor-fit sample shifting."""
-        return cls(marker_patches=patches)
-
-    def _marker_patch_index(self) -> dict[str, MarkerAnchoredPatch[Any]]:
-        index: dict[str, MarkerAnchoredPatch[Any]] = {}
-        for patch in self.marker_patches:
-            for name in patch.marker_names:
-                index[name] = patch
-        return index
-
-    def body_surface_map(self) -> dict[str, BodyContactSurface]:
-        """Body surfaces as a mapping."""
-        return dict(self.body_surfaces)
-
-    def compile_body_surfaces(
-        self,
-        *,
-        marker_positions_world: Mapping[str, FloatArray],
-        body_positions: Mapping[str, FloatArray],
-        body_quaternions: Mapping[str, FloatArray],
-        frame_index: int = 0,
-        quaternion_scalar_last: bool = True,
-    ) -> ContactSurfaceSet:
-        """Compile each marker patch at ``frame_index`` and return an updated set."""
-        compiled = self.body_surface_map()
-        for patch in self.marker_patches:
-            names = patch.marker_names
-            pts = np.stack(
-                [np.asarray(marker_positions_world[n][frame_index], dtype=np.float64) for n in names],
-                axis=0,
-            )
-            body_t = np.asarray(body_positions[patch.attach_body][frame_index], dtype=np.float64)
-            body_q = np.asarray(body_quaternions[patch.attach_body][frame_index], dtype=np.float64)
-            compiled[patch.attach_body] = patch.compile(
-                marker_positions_world=pts,
-                body_translation=body_t,
-                body_quaternion_xyzw=body_q,
-                quaternion_scalar_last=quaternion_scalar_last,
-            )
-        return ContactSurfaceSet(
-            marker_patches=self.marker_patches,
-            body_surfaces=tuple(compiled.items()),
-        )
-
-    def world_sample_points(
-        self,
-        points: ArrayLike,
-        marker_names: Sequence[str],
-        *,
-        body_rotations: Mapping[str, FloatArray] | None = None,
-        quaternion_scalar_last: bool = True,
-    ) -> FloatArray:
-        """Shift marker positions onto nominal surface samples in the capture frame."""
-        arr = np.asarray(points, dtype=np.float64)
-        if not self.marker_patches:
-            return arr
-        name_to_patch = self._marker_patch_index()
-        if arr.ndim == 2 and arr.shape[1] == 3:
-            if len(marker_names) != arr.shape[0]:
-                raise ValueError("marker_names length must match points.shape[0].")
-            out = arr.copy()
-            markers_per_frame = len(self.marker_names)
-            flat_trajectory = markers_per_frame > 0 and len(marker_names) > markers_per_frame
-            for row, name in enumerate(marker_names):
-                patch = name_to_patch[name]
-                frame_index = row // markers_per_frame if flat_trajectory else 0
-                rot = _rotation_for_marker_patch(
-                    patch,
-                    frame_index=frame_index,
-                    body_rotations=body_rotations,
-                    quaternion_scalar_last=quaternion_scalar_last,
-                )
-                out[row] += patch.world_delta(name, rotation=rot)
-            return out
-        if arr.ndim == 3 and arr.shape[2] == 3:
-            if len(marker_names) != arr.shape[1]:
-                raise ValueError("marker_names length must match points.shape[1].")
-            out = arr.copy()
-            for frame_idx in range(arr.shape[0]):
-                for col, name in enumerate(marker_names):
-                    patch = name_to_patch[name]
-                    rot = _rotation_for_marker_patch(
-                        patch,
-                        frame_index=frame_idx,
-                        body_rotations=body_rotations,
-                        quaternion_scalar_last=quaternion_scalar_last,
-                    )
-                    out[frame_idx, col] += patch.world_delta(name, rotation=rot)
-            return out
-        raise ValueError("points must have shape (N, K, 3), (K, 3), or flat (M, 3).")
-
-
-def apply_contact_surface_set(
-    points: ArrayLike,
-    marker_names: Sequence[str],
-    surface_set: ContactSurfaceSet | None,
-    *,
-    body_rotations: Mapping[str, FloatArray] | None = None,
-    quaternion_scalar_last: bool = True,
-) -> FloatArray:
-    """Apply a :class:`ContactSurfaceSet` marker offsets when configured."""
-    if surface_set is None:
-        return np.asarray(points, dtype=np.float64)
-    return surface_set.world_sample_points(
-        points,
-        marker_names,
-        body_rotations=body_rotations,
-        quaternion_scalar_last=quaternion_scalar_last,
-    )
+    )[frame_index]

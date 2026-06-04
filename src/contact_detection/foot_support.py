@@ -14,10 +14,15 @@ from scipy.spatial.transform import Rotation
 from .contact import PlaneSupportModel, SupportDetectionConfig
 from .enums import FloorModel, SupportModelType, normalize_enum
 from .geometry import (
-    BodyContactSurface,
-    ContactSurfaceSet,
-    apply_contact_surface_set,
+    ContactPatch,
+    RigidBodyContactModel,
+    RigidTransform,
+    apply_contact_model_offsets,
+    compile_contact_models,
     marker_names_for_flat_trajectory,
+    marker_names_for_contact_models,
+    model_for_marker,
+    model_map,
 )
 from .intervals import clean_mask_by_time, intervals_from_mask
 from .quiet import local_polynomial_derivative
@@ -60,9 +65,8 @@ class FootSupportConfig:
     """Thresholds and body names used for per-foot support classification.
 
     Floor geometry uses :attr:`FloorModel.PLANE` fit from sole-surface samples on
-    provisional then refined **ground-contact** frames (requires
-    :attr:`contact_surface_set` marker patches, ``floor_fit_marker_pos``, and
-    ``body_rotations`` for sole-based trials).
+    provisional then refined **ground-contact** frames. Sole-based trials provide
+    :attr:`contact_models`, ``floor_fit_marker_pos``, and ``body_rotations``.
 
     Attributes:
         foot_names (tuple[str, str]): Rigid-body names for left and right feet.
@@ -90,7 +94,8 @@ class FootSupportConfig:
         velocity_window_time (float): Window for polynomial velocity estimation (seconds).
         max_gap_time (float): Max gap to fill in state masks (seconds).
         min_state_time (float): Min duration for a state blip to survive cleaning (seconds).
-        contact_surface_set (ContactSurfaceSet | None): Sole marker patches and compiled surfaces.
+        contact_models (tuple[RigidBodyContactModel[Any], ...]): Body-local sole/contact models.
+        sole_patch_names (Mapping[str, str] | None): Optional body name → patch name mapping.
         floor_fit_marker_names (tuple[str, ...] | None): Marker names for sole samples / floor fit.
     """
 
@@ -119,7 +124,8 @@ class FootSupportConfig:
     velocity_window_time: float = 0.08
     max_gap_time: float = 0.10
     min_state_time: float = 0.12
-    contact_surface_set: ContactSurfaceSet | None = None
+    contact_models: tuple[RigidBodyContactModel[Any], ...] = ()
+    sole_patch_names: Mapping[str, str] | None = None
     floor_fit_marker_names: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
@@ -132,9 +138,10 @@ class FootSupportConfig:
         object.__setattr__(self, "floor_model", floor_model)
         if self.floor_fit_refinement_passes < 1:
             raise ValueError("floor_fit_refinement_passes must be >= 1.")
-        surface_set = self.contact_surface_set
-        if surface_set is not None and self.floor_fit_marker_names is None:
-            object.__setattr__(self, "floor_fit_marker_names", surface_set.marker_names)
+        contact_models = tuple(self.contact_models or ())
+        object.__setattr__(self, "contact_models", contact_models)
+        if contact_models and self.floor_fit_marker_names is None:
+            object.__setattr__(self, "floor_fit_marker_names", marker_names_for_contact_models(contact_models))
 
 
 @dataclass
@@ -216,7 +223,7 @@ def classify_foot_support_states(
     board_idx = _body_index(body_names, config.board_name)
     horizontal_axes = [axis for axis in range(3) if axis != config.up_axis]
 
-    sole_surfaces = _compile_sole_surfaces(
+    sole_patches = _compile_sole_patches(
         config,
         body_names=body_names,
         body_pos=body_pos,
@@ -248,7 +255,7 @@ def classify_foot_support_states(
         clearance_point = _clearance_points(
             foot_pos,
             foot_name=foot_name,
-            sole_surfaces=sole_surfaces,
+            sole_patches=sole_patches,
             body_rotations=body_rotations,
         )
         per_foot[foot_name] = {
@@ -382,11 +389,11 @@ def classify_foot_support_states(
         }
         all_intervals[foot_name] = intervals_by_state(t, state)
 
-    if config.contact_surface_set is not None and (
+    if config.contact_models and (
         floor_fit_marker_pos is None or body_rotations is None
     ):
         raise ValueError(
-            "contact_surface_set requires floor_fit_marker_pos and body_rotations."
+            "contact_models require floor_fit_marker_pos and body_rotations."
         )
 
     return FootSupportClassification(
@@ -464,16 +471,16 @@ def _clearance_points(
     foot_pos: FloatArray,
     *,
     foot_name: str,
-    sole_surfaces: Mapping[str, BodyContactSurface],
+    sole_patches: Mapping[str, ContactPatch],
     body_rotations: Mapping[str, FloatArray] | None,
 ) -> FloatArray:
-    if foot_name not in sole_surfaces or body_rotations is None:
+    if foot_name not in sole_patches or body_rotations is None:
         return foot_pos
     return _sole_contact_points(
         foot_pos,
         body_rotations=body_rotations,
         foot_name=foot_name,
-        sole=sole_surfaces[foot_name],
+        sole=sole_patches[foot_name],
     )
 
 
@@ -553,7 +560,7 @@ def _floor_fit_samples_for_ground_masks(
 ) -> FloatArray:
     """Collect sole surface samples for each foot only on that foot's ground-contact frames."""
     chunks: list[FloatArray] = []
-    surface_set = config.contact_surface_set
+    contact_models = config.contact_models
 
     if floor_fit_marker_pos is not None:
         marker_pos = np.asarray(floor_fit_marker_pos, dtype=float)
@@ -562,12 +569,11 @@ def _floor_fit_samples_for_ground_masks(
         names = tuple(floor_fit_marker_names or config.floor_fit_marker_names or ())
         if len(names) != marker_pos.shape[1]:
             raise ValueError("floor_fit_marker_names length must match floor_fit_marker_pos.")
-        if surface_set is None:
-            raise ValueError("contact_surface_set is required when floor_fit_marker_pos is set.")
-        name_to_patch = surface_set._marker_patch_index()
+        if not contact_models:
+            raise ValueError("contact_models are required when floor_fit_marker_pos is set.")
         columns_by_body: dict[str, list[int]] = {}
         for col, name in enumerate(names):
-            body = name_to_patch[name].attach_body
+            body = model_for_marker(contact_models, name).body_name
             columns_by_body.setdefault(body, []).append(col)
         for foot_name, foot_mask in per_foot_masks.items():
             indices = np.flatnonzero(foot_mask)
@@ -580,10 +586,10 @@ def _floor_fit_samples_for_ground_masks(
             col_names = tuple(names[col] for col in cols)
             flat_names = marker_names_for_flat_trajectory(col_names, len(indices))
             chunks.append(
-                apply_contact_surface_set(
+                apply_contact_model_offsets(
                     samples,
                     flat_names,
-                    surface_set,
+                    contact_models,
                     body_rotations=_body_rotations_on_frames(body_rotations, indices),
                 )
             )
@@ -619,8 +625,7 @@ def _fit_plane_floor(points: FloatArray, config: FootSupportConfig) -> _FloorSur
             f"Need at least {config.min_floor_fit_samples} finite sole samples on "
             f"ground-contact frames to fit a floor plane; got {len(finite_points)}."
         )
-    surface_set = config.contact_surface_set
-    use_tilted_plane = surface_set is not None and bool(surface_set.marker_patches)
+    use_tilted_plane = bool(config.contact_models)
     if use_tilted_plane:
         support_config = SupportDetectionConfig(
             model_type=SupportModelType.PLANE,
@@ -671,7 +676,7 @@ def _estimate_board_contact_offset(
     return float(np.median(candidates))
 
 
-def _compile_sole_surfaces(
+def _compile_sole_patches(
     config: FootSupportConfig,
     *,
     body_names: list[str],
@@ -679,15 +684,12 @@ def _compile_sole_surfaces(
     floor_fit_marker_pos: ArrayLike | None,
     floor_fit_marker_names: Sequence[str] | None,
     body_rotations: Mapping[str, FloatArray] | None,
-) -> dict[str, BodyContactSurface]:
-    surface_set = config.contact_surface_set
-    if surface_set is None:
+) -> dict[str, ContactPatch]:
+    if not config.contact_models:
         return {}
-    compiled = surface_set.body_surface_map()
-    if not surface_set.marker_patches:
-        return {name: compiled[name] for name in config.foot_names if name in compiled}
+    compiled = model_map(config.contact_models)
     if floor_fit_marker_pos is None or body_rotations is None:
-        return {name: compiled[name] for name in config.foot_names if name in compiled}
+        return _sole_patches_from_models(config, compiled)
     marker_pos = np.asarray(floor_fit_marker_pos, dtype=float)
     names = tuple(floor_fit_marker_names or config.floor_fit_marker_names or ())
     marker_trajs = {names[col]: marker_pos[:, col, :] for col in range(len(names))}
@@ -695,13 +697,31 @@ def _compile_sole_surfaces(
         body_names[idx]: body_pos[:, idx, :] for idx in range(body_pos.shape[1])
     }
     frame_index = _first_finite_calibration_frame(marker_pos)
-    updated = surface_set.compile_body_surfaces(
+    updated = compile_contact_models(
+        config.contact_models,
         marker_positions_world=marker_trajs,
         body_positions=body_positions,
         body_quaternions=dict(body_rotations),
         frame_index=frame_index,
     )
-    return updated.body_surface_map()
+    return _sole_patches_from_models(config, model_map(updated))
+
+
+def _sole_patches_from_models(
+    config: FootSupportConfig,
+    models: Mapping[str, RigidBodyContactModel[Any]],
+) -> dict[str, ContactPatch]:
+    out: dict[str, ContactPatch] = {}
+    patch_names = dict(config.sole_patch_names or {})
+    for foot_name in config.foot_names:
+        model = models.get(foot_name)
+        if model is None:
+            continue
+        try:
+            out[foot_name] = model.patch(patch_names.get(foot_name))
+        except KeyError:
+            continue
+    return out
 
 
 def _first_finite_calibration_frame(marker_pos: FloatArray) -> int:
@@ -717,13 +737,14 @@ def _sole_contact_points(
     *,
     body_rotations: Mapping[str, FloatArray],
     foot_name: str,
-    sole: BodyContactSurface,
+    sole: ContactPatch,
 ) -> FloatArray:
     quats = np.asarray(body_rotations[foot_name], dtype=np.float64)
     out = np.empty_like(foot_pos)
     for frame_idx in range(foot_pos.shape[0]):
         rot = Rotation.from_quat(quats[frame_idx])
-        out[frame_idx] = sole.center_world(foot_pos[frame_idx], rot)
+        view = sole.view(RigidTransform(translation=foot_pos[frame_idx], rotation=rot))
+        out[frame_idx] = view.contact_point_world
     return out
 
 
